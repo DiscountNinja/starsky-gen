@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling>=1.25.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "starsky-gen"
+version = "0.1.0"
+description = "Realistic starfield generator for games and skyboxes"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "starsky-gen contributors" }
+]
+dependencies = [
+  "numpy>=1.26.0",
+  "Pillow>=10.0.0",
+  "typer>=0.12.0",
+  "rich>=13.0.0",
+  "pydantic>=2.7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+]
+
+[project.scripts]
+starsky-gen = "starsky_gen.cli:app"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
