@@ -28,7 +28,7 @@ pip install -e ".[dev]"
 ## Run
 
 ```bash
-starsky-gen generate
+starsky-gen
 ```
 
 Example with explicit options:
