@@ -1,8 +1,8 @@
-<img width="1024" height="512" alt="starsky-gen" src="https://github.com/user-attachments/assets/5cc44295-65b0-45b1-85ab-c474089b589a" />
 # starsky-gen
 
 Photo Realistic starfield generator for games, skyboxes, and background assets.
-
+Low resolution sample:
+<img width="1024" height="512" alt="starsky-gen" src="https://github.com/user-attachments/assets/5cc44295-65b0-45b1-85ab-c474089b589a" />
 ## Features
 
 - Fully flag-driven Python CLI workflow (no interactive prompts).
@@ -17,6 +17,8 @@ Photo Realistic starfield generator for games, skyboxes, and background assets.
 - Batch generation with per-render and total progress bars.
 - Optional JPEG artifact pass for subtle compression character.
 - Default background avoids pure black, using a noisy bluish-gray field with galactic-disk weighting.
+
+<img width="2048" height="1024" alt="starsky-gen-norm" src="https://github.com/user-attachments/assets/9057f85f-0c4f-4391-ae9a-d8cd625276fd" />
 
 ## Install
 
