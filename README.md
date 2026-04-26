@@ -1,3 +1,4 @@
+<img width="1024" height="512" alt="starsky-gen" src="https://github.com/user-attachments/assets/5cc44295-65b0-45b1-85ab-c474089b589a" />
 # starsky-gen
 
 Photo Realistic starfield generator for games, skyboxes, and background assets.
