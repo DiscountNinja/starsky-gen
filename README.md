@@ -31,10 +31,12 @@ pip install -e ".[dev]"
 starsky-gen
 ```
 
+`starsky-gen` now defaults to `generate` when no subcommand is provided.
+
 Example with explicit options:
 
 ```bash
-starsky-gen generate \
+starsky-gen \
   --projection-mode both \
   --output-format png \
   --nebula-mode galaxy_streak \
@@ -47,7 +49,84 @@ starsky-gen generate \
   --seed 42
 ```
 
-Default behavior:
+You can still use explicit subcommands:
+
+```bash
+starsky-gen generate
+starsky-gen assist
+```
+
+## CLI Reference
+
+### `generate` command
+
+```bash
+starsky-gen generate [OPTIONS]
+```
+
+Main output and run controls:
+
+- `--width` (int, default `2048`)
+- `--height` (int, default `1024`)
+- `--output-base-name` (str, default `starsky`)
+- `--output-dir` (path, default `output`)
+- `--generations` (int >= 1, default `1`)
+- `--seed` (int, optional)
+- `--projection-mode` (`equirectangular|cubemap|both`, default `equirectangular`)
+- `--cube` / `-cube` (shortcut to include cubemap, sets projection to `both`)
+- `--output-format` (`png|jpg`, default `png`)
+- `--quality` (JPEG quality `50..100`, default `100`)
+- `--cubemap-face-size` (`128..4096`, default `1024`)
+
+Feature toggles:
+
+- `--stars/--no-stars`
+- `--depth/--no-depth`
+- `--nebula/--no-nebula`
+- `--galaxy-view/--no-galaxy-view`
+- `--background-gradient/--no-background-gradient`
+- `--black-background/--no-black-background`
+- `--jpeg-artifact-pass/--no-jpeg-artifact-pass`
+- `--long-exposure-look/--flat-exposure`
+
+Background texture:
+
+- `--background-texture-strength` (`0.0..2.0`, default `1.0`)
+
+Nebula controls:
+
+- `--nebula-mode` (`distant|full|galaxy_streak`, default `galaxy_streak`)
+- `--nebula-style` (`subtle|balanced|dramatic`, default `balanced`)
+- `--cloud-continuity` (`0.6..1.6`, default `1.22`)
+- `--dust-coverage` (`0.5..1.6`, default `0.98`)
+- `--dust-strength` (`0.5..1.8`, default `1.14`)
+- `--nebula-debug-pass` (`normal|occluder_only|continuum_only`, default `normal`)
+
+### `assist` command
+
+```bash
+starsky-gen assist [OPTIONS]
+```
+
+Round/candidate controls:
+
+- `--rounds` (`1..100`, default `5`)
+- `--candidates-per-round` (`2..64`, default `8`)
+- `--log-file` (path, default `output/assist_log.jsonl`)
+
+Shared rendering controls (same semantics as `generate`):
+
+- `--width`, `--height`, `--output-base-name`, `--output-dir`
+- `--seed`, `--output-format`, `--nebula-mode`, `--quality`
+- `--stars/--no-stars`, `--depth/--no-depth`, `--nebula/--no-nebula`
+- `--galaxy-view/--no-galaxy-view`
+- `--background-gradient/--no-background-gradient`
+- `--black-background/--no-black-background`
+- `--long-exposure-look/--flat-exposure`
+- `--background-texture-strength`
+- `--nebula-style`, `--cloud-continuity`, `--dust-coverage`, `--dust-strength`
+
+Default behavior summary:
 
 - `--projection-mode equirectangular` (use `--cube` / `-cube` to include cubemap too)
 - `--nebula-mode galaxy_streak`

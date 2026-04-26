@@ -43,6 +43,12 @@ class FeatureConfig(BaseModel):
             "(disable for a cleaner symmetric grade)."
         ),
     )
+    background_texture_strength: float = Field(
+        1.0,
+        ge=0.0,
+        le=2.0,
+        description="Scale for unresolved-star background texture (0=smooth, 1=default, 2=grittier).",
+    )
 
 
 class NebulaTuningConfig(BaseModel):
@@ -65,22 +71,29 @@ class NebulaTuningConfig(BaseModel):
         description="High-level nebula preset controlling dust/extinction character; start here before scalar tweaks.",
     )
     cloud_continuity: float = Field(
-        1.12,
+        1.22,
         ge=0.6,
         le=1.6,
         description="Cloud connectivity/thickness along the galactic band; higher values produce denser connected volumes.",
     )
     dust_coverage: float = Field(
-        1.02,
+        0.98,
         ge=0.5,
         le=1.6,
         description="Fraction of the band eligible for dark dust/void carving; lower values create fewer dust regions.",
     )
     dust_strength: float = Field(
-        0.92,
+        1.14,
         ge=0.5,
         le=1.8,
         description="Dust extinction strength against stars/background; raise only after coverage feels right.",
+    )
+    debug_pass: Literal["normal", "occluder_only", "continuum_only"] = Field(
+        "normal",
+        description=(
+            "Diagnostic render for galaxy_streak nebula: `normal` full composite; `occluder_only` shows "
+            "dust_rgb blend only; `continuum_only` shows synthetic low-frequency continuum only (boosted for visibility)."
+        ),
     )
 
 
