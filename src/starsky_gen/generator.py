@@ -610,9 +610,14 @@ def _add_stars_from_catalog(
     point_disk_stars: bool = False,
     plane_psf_elongation: bool = False,
     cluster_layer: bool = False,
+    progress_cb: Callable[[float], None] | None = None,
 ) -> dict[str, dict[str, int]]:
     xs, ys = sph_to_equirect_xy(catalog["lon"], catalog["lat"], cfg.width, cfg.height)
     has_bv = "bv" in catalog
+    n = max(1, int(xs.shape[0]))
+    if progress_cb is not None:
+        progress_cb(0.0)
+    next_report = 0.05
     for i in range(xs.shape[0]):
         color_name = STAR_COLOR_NAMES[int(catalog["color_idx"][i])]
         size_name = STAR_SIZE_NAMES[int(catalog["size_idx"][i])]
@@ -798,6 +803,11 @@ def _add_stars_from_catalog(
             # Keep halo warmer but dull/desaturated so the bright star core remains the focal point.
             halo_rgb = np.array([0.16, 0.145, 0.13], dtype=np.float64) * float(rng.uniform(0.90, 1.05))
             _paint_asymmetric_halo(img, xi, yi, halo_rgb, rng, strength=halo_strength)
+        if progress_cb is not None:
+            frac = float(i + 1) / float(n)
+            if frac >= next_report or i + 1 == n:
+                progress_cb(min(frac, 1.0))
+                next_report += 0.05
     np.clip(img, 0.0, 1.0, out=img)
     stats = catalog_stats(catalog)
     return {"color_counts": stats.color_counts, "size_counts": stats.size_counts}
@@ -828,14 +838,26 @@ def _enforce_horizontal_wrap(img: np.ndarray, *, seam_width: int | None = None) 
 def render_single(
     cfg: RenderConfig,
     generation_index: int,
-    on_pass_complete: Callable[[], None] | None = None,
+    on_pass_complete: Callable[[str, float], None] | Callable[[str], None] | Callable[[], None] | None = None,
 ) -> tuple[dict[str, Path], dict[str, dict[str, int]]]:
+    def _notify_stage(stage: str, progress: float = 1.0) -> None:
+        if on_pass_complete is None:
+            return
+        try:
+            on_pass_complete(stage, float(np.clip(progress, 0.0, 1.0)))  # type: ignore[misc]
+        except TypeError:
+            try:
+                on_pass_complete(stage)  # type: ignore[misc]
+            except TypeError:
+                on_pass_complete()  # type: ignore[operator]
+
     seed = (cfg.seed or 0) + generation_index
     seed_seq = np.random.SeedSequence(seed)
     rng_bg, rng_stars_bg, rng_clusters, rng_stars_fg, rng_nebula, rng_post, rng_chroma = [
         np.random.default_rng(s) for s in seed_seq.spawn(7)
     ]
     wrap_lon_blur_x = bool(cfg.wrap_safe)
+    _notify_stage("background", 0.0)
     canvas = _background_plane(
         rng=rng_bg,
         height=cfg.height,
@@ -844,8 +866,7 @@ def render_single(
         black_background=cfg.features.black_background,
         texture_strength=cfg.features.background_texture_strength,
     )
-    if on_pass_complete:
-        on_pass_complete()
+    _notify_stage("background", 1.0)
 
     stats = _empty_star_stats()
     stars_bg = np.zeros_like(canvas)
@@ -859,13 +880,22 @@ def render_single(
         and cfg.nebula_mode == NebulaMode.galaxy_streak
         and cfg.features.stars
     ):
+        _notify_stage("nebula prep", 0.0)
         neb0, neb_emit0, dust0, lane0 = generate_nebula(
-            rng_nebula, cfg.nebula_mode, cfg.height, cfg.width, cfg.nebula_tuning
+            rng_nebula,
+            cfg.nebula_mode,
+            cfg.height,
+            cfg.width,
+            cfg.nebula_tuning,
+            progress_cb=lambda p: _notify_stage("nebula prep", 0.10 + p * 0.75),
         )
         ext0 = _extinction_from_dust_and_lane(dust0, lane0, cfg)
+        _notify_stage("nebula prep", 0.90)
         nebula_bundle = (neb0, neb_emit0, dust0, lane0, ext0)
+        _notify_stage("nebula prep", 1.0)
 
     if cfg.features.stars:
+        _notify_stage("stars background prep", 0.0)
         cat_bg = sample_star_catalog(
             rng_stars_bg,
             cfg.width,
@@ -875,6 +905,7 @@ def render_single(
             galactic_band_boost=band_boost,
             latitude_color_bias=True,
         )
+        _notify_stage("stars background prep", 0.50)
         if nebula_bundle is not None and cfg.features.galaxy_view:
             reroll_stars_in_dark_lanes(
                 cat_bg,
@@ -883,6 +914,8 @@ def render_single(
                 cfg.height,
                 nebula_bundle[3],
             )
+        _notify_stage("stars background prep", 1.0)
+        _notify_stage("stars background", 0.0)
         stats = _add_stars_from_catalog(
             stars_bg,
             rng_stars_bg,
@@ -893,6 +926,7 @@ def render_single(
             point_disk_stars=cfg.features.galaxy_view,
             plane_psf_elongation=cfg.features.galaxy_view,
             cluster_layer=False,
+            progress_cb=lambda p: _notify_stage("stars background", p * 0.78),
         )
         if cfg.features.galaxy_view:
             cat_cl = sample_cluster_star_catalog(
@@ -908,6 +942,7 @@ def render_single(
                 point_disk_stars=False,
                 plane_psf_elongation=True,
                 cluster_layer=True,
+                progress_cb=lambda p: _notify_stage("stars background", 0.78 + p * 0.18),
             )
             stats = _merge_star_stats(stats, stats_cl)
         if cfg.features.galaxy_view:
@@ -915,19 +950,25 @@ def render_single(
             paint_reference_anchors(stars_bg, rng_stars_bg, cfg)
             # Brighter star field while preserving diffuse Milky Way body.
             np.multiply(stars_bg, 0.66, out=stars_bg, casting="unsafe")
-        if on_pass_complete:
-            on_pass_complete()
+        _notify_stage("stars background", 1.0)
     canvas = np.clip(canvas + stars_bg, 0.0, 1.0)
 
     ext_paint_for_fg: np.ndarray | None = None
     if cfg.features.nebula:
+        _notify_stage("nebula clouds/dust", 0.08)
         if nebula_bundle is not None:
             neb, neb_emit, dust_occlusion, lane_ext, extinction = nebula_bundle
         else:
             neb, neb_emit, dust_occlusion, lane_ext = generate_nebula(
-                rng_nebula, cfg.nebula_mode, cfg.height, cfg.width, cfg.nebula_tuning
+                rng_nebula,
+                cfg.nebula_mode,
+                cfg.height,
+                cfg.width,
+                cfg.nebula_tuning,
+                progress_cb=lambda p: _notify_stage("nebula clouds/dust", 0.08 + p * 0.18),
             )
             extinction = _extinction_from_dust_and_lane(dust_occlusion, lane_ext, cfg)
+        _notify_stage("nebula clouds/dust", 0.30)
         if cfg.nebula_mode == NebulaMode.galaxy_streak:
             # Balance x/y: heavy y-only preserved longitude stripes in extinction → vertical star columns.
             ext_paint = _blur_separable_xy(extinction, passes=3, periodic_x=wrap_lon_blur_x)
@@ -944,6 +985,7 @@ def render_single(
             galaxy_streak=cfg.nebula_mode == NebulaMode.galaxy_streak,
             rng_mottle=rng_nebula,
         )
+        _notify_stage("nebula clouds/dust", 0.52)
         neb_luma = np.mean(neb, axis=2)
         if cfg.nebula_mode == NebulaMode.galaxy_streak:
             neb_luma = np.clip(neb_luma + np.mean(neb_emit, axis=2) * 0.32, 0.0, 1.0)
@@ -1094,8 +1136,7 @@ def render_single(
             band_w = np.exp(-((yy**2) / 0.62))
             warm_bloom = np.array([0.42, 0.38, 0.32], dtype=np.float64)
             canvas = np.clip(canvas + (bloom * band_w)[..., None] * warm_bloom * 0.018, 0.0, 1.0)
-        if on_pass_complete:
-            on_pass_complete()
+        _notify_stage("nebula clouds/dust", 1.0)
 
     if cfg.features.galaxy_view:
         canvas = _apply_separated_disk_sky_grain(
@@ -1108,6 +1149,7 @@ def render_single(
         )
 
     if cfg.features.stars:
+        _notify_stage("stars foreground prep", 0.0)
         stars_fg = np.zeros_like(canvas)
         cat_fg = sample_star_catalog(
             rng_stars_fg,
@@ -1117,6 +1159,8 @@ def render_single(
             layer="foreground",
             latitude_color_bias=False,
         )
+        _notify_stage("stars foreground prep", 1.0)
+        _notify_stage("stars foreground", 0.0)
         stats_fg = _add_stars_from_catalog(
             stars_fg,
             rng_stars_fg,
@@ -1127,6 +1171,7 @@ def render_single(
             point_disk_stars=False,
             plane_psf_elongation=cfg.features.galaxy_view,
             cluster_layer=False,
+            progress_cb=lambda p: _notify_stage("stars foreground", p),
         )
         stats = _merge_star_stats(stats, stats_fg)
         if cfg.features.galaxy_view:
@@ -1139,8 +1184,7 @@ def render_single(
                 stars_fg *= ext_paint_for_fg[..., None]
             np.multiply(stars_fg, 0.74, out=stars_fg, casting="unsafe")
         canvas = np.clip(canvas + stars_fg, 0.0, 1.0)
-        if on_pass_complete:
-            on_pass_complete()
+        _notify_stage("stars foreground", 1.0)
 
     if cfg.features.galaxy_view:
         yy = np.linspace(-1.0, 1.0, cfg.height)[:, None]
@@ -1163,13 +1207,11 @@ def render_single(
         luma_g = np.mean(canvas, axis=2, keepdims=True)
         canvas = np.clip(luma_g + (canvas - luma_g) * 0.965, 0.0, 1.0)
         canvas = np.clip(canvas, 0.0, 1.0)
-        if on_pass_complete:
-            on_pass_complete()
+        _notify_stage("grade/color", 1.0)
 
     if cfg.features.jpeg_artifact_pass and cfg.output_format == "jpg":
         canvas = apply_jpeg_artifacts(canvas, cfg.quality)
-        if on_pass_complete:
-            on_pass_complete()
+        _notify_stage("jpeg artifacts", 1.0)
 
     if cfg.wrap_safe:
         canvas = _enforce_horizontal_wrap(canvas)
@@ -1182,18 +1224,15 @@ def render_single(
         eq_path = cfg.output_dir / f"{base_name}_equirect.{ext}"
         _save_image(canvas, eq_path, ext, cfg.quality)
         saved["equirectangular"] = eq_path
-        if on_pass_complete:
-            on_pass_complete()
+        _notify_stage("save equirectangular", 1.0)
 
     if cfg.projection_mode in {ProjectionMode.cubemap, ProjectionMode.both}:
         faces = cubemap_faces_from_equirect(canvas, cfg.cubemap_face_size)
-        if on_pass_complete:
-            on_pass_complete()
+        _notify_stage("project cubemap", 1.0)
         for face_name, face_img in faces.items():
             face_path = cfg.output_dir / f"{base_name}_cube_{face_name}.{ext}"
             _save_image(face_img, face_path, ext, cfg.quality)
-            if on_pass_complete:
-                on_pass_complete()
+            _notify_stage(f"save cube {face_name}", 1.0)
         saved["cubemap"] = cfg.output_dir
 
     return saved, stats

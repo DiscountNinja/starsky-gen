@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Callable
+
 import numpy as np
 
 from starsky_gen.config import NebulaMode, NebulaTuningConfig
@@ -212,7 +214,13 @@ def generate_nebula(
     height: int,
     width: int,
     tuning: NebulaTuningConfig,
+    progress_cb: Callable[[float], None] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def _p(v: float) -> None:
+        if progress_cb is not None:
+            progress_cb(float(np.clip(v, 0.0, 1.0)))
+
+    _p(0.02)
     # Presets provide coarse artistic direction; scalar knobs provide fine control.
     # Keep these values synchronized with the tuning guide in `NebulaTuningConfig`.
     # Practical baseline while tuning:
@@ -249,6 +257,7 @@ def generate_nebula(
     else:
         x_idx = np.clip(x_idx, 0, width - 1)
     n = n[y_idx, x_idx]
+    _p(0.08)
 
     color_field = _sn(octaves=2)
     color_mix = np.clip(color_field * 1.2, 0.0, 1.0)[..., None]
@@ -271,12 +280,14 @@ def generate_nebula(
         tint_a = np.array([0.30, 0.18, 0.38], dtype=np.float64)
         tint_b = np.array([0.58, 0.34, 0.64], dtype=np.float64)
         color = tint_a * (1.0 - color_mix) + tint_b * color_mix
+        _p(0.48)
     elif mode == NebulaMode.full:
         broad = np.exp(-((y**2) / 0.9))
         mask = (n * 0.9 + broad * 0.35).clip(0.0, 1.0) ** 1.2
         tint_a = np.array([0.26, 0.16, 0.34], dtype=np.float64)
         tint_b = np.array([0.54, 0.31, 0.60], dtype=np.float64)
         color = tint_a * (1.0 - color_mix) + tint_b * color_mix
+        _p(0.48)
     else:
         # Off-center bulge: optional per seed so not every generation has a pronounced core.
         sign = -1.0 if rng.random() < 0.5 else 1.0
@@ -290,6 +301,7 @@ def generate_nebula(
             cx_band = _wrap_x11_scalar(float(rng.uniform(-0.25, 0.25)) + lon_bias)
             # Broad, weak center hint only; avoids fixed-looking bulge each render.
             core_band = np.exp(-(_wrap_dx(x, cx_band) ** 2) / rng.uniform(0.70, 1.05)) * rng.uniform(0.24, 0.48)
+        _p(0.14)
         band_warp = (_sn(octaves=1) - 0.5) * 0.32
         streak = np.exp(-(((y - band_warp) ** 2) / 0.48))
         broad_band = np.exp(-((y**2) / 1.08))
@@ -341,6 +353,7 @@ def generate_nebula(
         bridge_map = _rz(rng.random((max(2, height // 12), max(2, width // 7))))
         bridge_map = _contrast_curve(bridge_map, 0.18, 0.90, 0.78)
         bridge_map = _blur_separable_xy(bridge_map, passes=1, periodic_x=wrap_x)
+        _p(0.26)
 
         # Lane texture: finer in x than before to avoid tall vertical cell boundaries (stripe artifacts).
         lane_coarse = rng.random((max(2, height // 52), max(2, width // 12)))
@@ -371,6 +384,7 @@ def generate_nebula(
             lane_count=int(rng.integers(2, 5)),
             periodic_x=True,
         )
+        _p(0.36)
         lane_mix_map = _contrast_curve(_sn(octaves=2), 0.18, 0.94, 0.90)
         lane_mix_map = _blur_separable_xy(lane_mix_map, passes=2, periodic_x=wrap_x)
         lane_mix_w = np.clip(0.14 + 0.20 * lane_mix_map, 0.10, 0.36)
@@ -471,6 +485,7 @@ def generate_nebula(
             0.0,
             1.0,
         )
+        _p(0.48)
         # Great Rift–style trench: one broad, tilted dark lane through the disk (not mirrored).
         rx = _wrap_x11_scalar(float(np.clip(rng.normal(sign * rng.uniform(0.12, 0.44), 0.14), -0.62, 0.62)) + lon_bias)
         ry = float(np.clip(rng.normal(0.0, 0.055), -0.12, 0.12))
@@ -535,6 +550,7 @@ def generate_nebula(
             0.0,
             1.0,
         )
+        _p(0.62)
         # Extra mid-scale diffuse clouds (soft, band-aligned) so extinction + nebula read dustier.
         mid_wisp = _sn(octaves=3) * np.clip(
             streak * 0.72 + broad_band * 0.28, 0.0, 1.0
@@ -705,6 +721,7 @@ def generate_nebula(
         )
         hot_rgb = np.array([0.12, 0.11, 0.095], dtype=np.float64)
         color = np.clip(color + inner_hot[..., None] * hot_rgb * (0.085 + 0.035 * cloud_gain), 0.0, 1.0)
+        _p(0.74)
         # Softer brown transition into bright gold at dust silhouettes (volume in front of backlight).
         ds_chroma = np.clip(
             _blur_separable_xy(dust_structure, passes=3, periodic_x=wrap_x) ** 0.48, 0.0, 1.0
@@ -787,6 +804,7 @@ def generate_nebula(
         spot_add = np.clip(spot_add, 0.0, 1.0)
         color = np.clip(color + spot_add * 0.72, 0.0, 1.0)
         emit_rgb += spot_add
+        _p(0.86)
         # S II–weighted deep red wing (reads beside Hα without neon oversaturation).
         sii_w = _blur_separable_xy(
             ha_mask * band_envelope * np.clip(streak, 0.0, 1.0),
@@ -984,6 +1002,7 @@ def generate_nebula(
     mask_tex = _sn(octaves=2)
     mask_tex = (mask_tex - 0.5) * 0.024
     mask *= 1.0 + mask_tex * 0.055
+    _p(0.92)
 
     base_glow = _sn(octaves=2)
     base_glow = (base_glow - 0.5) * 0.065
@@ -1000,6 +1019,7 @@ def generate_nebula(
     else:
         color += base_glow[..., None]
         color += background
+    _p(0.96)
     if mode == NebulaMode.galaxy_streak:
         dust_structure = _blur_separable_xy(dust_structure, passes=2, periodic_x=wrap_x)
     dust_str_w = (0.56 + 0.26 * coverage_gain) if mode == NebulaMode.galaxy_streak else (0.28 + 0.14 * coverage_gain)
@@ -1265,6 +1285,7 @@ def generate_nebula(
         lm_e = np.mean(neb_emit, axis=2, keepdims=True)
         neb_emit = np.clip(lm_e + (neb_emit - lm_e) * 1.06, 0.0, 1.0)
         neb_emit = np.clip(neb_emit * 1.05, 0.0, 1.0)
+        _p(1.0)
         return (
             np.clip(neb, 0.0, 1.0),
             np.clip(neb_emit, 0.0, 1.0),
@@ -1272,4 +1293,5 @@ def generate_nebula(
             lane_extinction,
         )
     emit_empty = np.zeros((height, width, 3), dtype=np.float64)
+    _p(1.0)
     return color * (mask[..., None] * 0.38 + 0.05), emit_empty, dust_occlusion, lane_extinction
