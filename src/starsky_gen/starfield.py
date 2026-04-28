@@ -439,15 +439,29 @@ def paint_star(
                 halo_w = 0.038 + 0.025 * min(radius, 7) + halo_boost
                 halo = np.exp(-(d**2) / (2 * halo_sigma**2)) * halo_w
             glow_jitter = 1.0 + rng.uniform(-glow_jitter_scale, glow_jitter_scale)
-            intensity = min(1.0, (base * 0.98 + halo) * glow_jitter)
+            base_term = base * 0.98
+            denom = base_term + halo + 1e-9
+            intensity = min(1.0, (base_term + halo) * glow_jitter)
             if d < core * 0.40:
                 intensity = min(1.0, intensity * 1.06)
-            if d > core:
-                edge_cool = np.array([0.78, 0.86, 1.0])
-                pixel_color = color_rgb * 0.93 + edge_cool * 0.07
-            else:
+            # Core stays chromatic; halo and mid-disk skew toward neutral white (brighter),
+            # strongest in the radial middle of the glow — avoids a same-hue blue bloom.
+            if d <= core:
                 pixel_color = color_rgb
-            img[py, px] += pixel_color * intensity
+                luma_boost = 1.0
+            else:
+                h_frac = float(halo / denom)
+                span = max(float(local_radius) - core, 1e-6)
+                mid_u = float(np.clip((d - core) / span, 0.0, 1.0))
+                mid_peak = 4.0 * mid_u * (1.0 - mid_u)
+                white_w = float(
+                    np.clip(0.06 + 0.38 * h_frac + 0.30 * mid_peak, 0.0, 0.78)
+                )
+                luma = float(np.clip(np.mean(color_rgb), 0.0, 1.0))
+                neutral = np.full(3, min(1.0, luma * 1.07 + 0.025), dtype=np.float64)
+                pixel_color = color_rgb * (1.0 - white_w) + neutral * white_w
+                luma_boost = 1.0 + 0.085 * white_w
+            img[py, px] += pixel_color * intensity * luma_boost
 
     if bright_star and rng.random() < 0.44:
         sp = float(rng.uniform(0.058, 0.12)) * float(np.max(color_rgb))
