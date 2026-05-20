@@ -17,6 +17,7 @@ from starsky_gen.config import (
     OutputFormat,
     ProjectionMode,
     RenderConfig,
+    RenderProfile,
 )
 from starsky_gen.generator import render_single
 
@@ -28,13 +29,53 @@ app = typer.Typer(
 console = Console()
 
 
+def _feature_config_from_cli(
+    *,
+    stars: bool,
+    depth: bool,
+    nebula: bool,
+    galaxy_view: bool,
+    background_gradient: bool,
+    black_background: bool,
+    jpeg_artifact_pass: bool,
+    long_exposure_look: bool,
+    background_texture_strength: float,
+    render_profile: str = "full",
+    debug_export_layers: bool = False,
+    debug_grayscale_morphology: bool = False,
+    morphology_void_strength: float = 0.72,
+    morphology_scar_strength: float = 0.68,
+) -> FeatureConfig:
+    return FeatureConfig(
+        stars=stars,
+        depth=depth,
+        nebula=nebula,
+        galaxy_view=galaxy_view,
+        background_gradient=background_gradient,
+        black_background=black_background,
+        jpeg_artifact_pass=jpeg_artifact_pass,
+        long_exposure_look=long_exposure_look,
+        background_texture_strength=background_texture_strength,
+        render_profile=RenderProfile(render_profile),
+        debug_export_layers=debug_export_layers,
+        debug_grayscale_morphology=debug_grayscale_morphology,
+        morphology_void_strength=morphology_void_strength,
+        morphology_scar_strength=morphology_scar_strength,
+    )
+
+
 @app.callback(invoke_without_command=True)
 def _default_to_generate(
     ctx: typer.Context,
     width: int = typer.Option(2048, help="Output width for equirectangular renders."),
     height: int = typer.Option(1024, help="Output height for equirectangular renders."),
     output_base_name: str = typer.Option("starsky", help="Base filename prefix."),
-    output_dir: Path = typer.Option(Path("output"), help="Directory for generated images."),
+    output_dir: Path = typer.Option(
+        Path("output"),
+        "--output-dir",
+        "-o",
+        help="Directory for generated images.",
+    ),
     generations: int = typer.Option(1, min=1, help="Number of generations to produce."),
     seed: int | None = typer.Option(None, help="Base random seed for deterministic batches."),
     projection_mode: ProjectionMode = typer.Option(
@@ -101,6 +142,20 @@ def _default_to_generate(
         "normal",
         help="Diagnostic: normal nebula, occluder-only dust RGB, or continuum-only field (galaxy_streak only).",
     ),
+    render_profile: str = typer.Option(
+        "full",
+        help="Render pipeline: physical | physical_grade | full.",
+    ),
+    debug_export_layers: bool = typer.Option(
+        False, "--debug-layers", help="Write morphology/star/extinction layer PNGs."
+    ),
+    debug_grayscale_morphology: bool = typer.Option(
+        False,
+        "--grayscale-morphology",
+        help="Write grayscale morphology diagnostic PNG.",
+    ),
+    morphology_void_strength: float = typer.Option(0.72, min=0.0, max=1.0),
+    morphology_scar_strength: float = typer.Option(0.68, min=0.0, max=1.5),
 ) -> None:
     """Run a default render when no subcommand is provided."""
     if ctx.invoked_subcommand is None:
@@ -132,6 +187,11 @@ def _default_to_generate(
             dust_coverage=dust_coverage,
             dust_strength=dust_strength,
             nebula_debug_pass=nebula_debug_pass,
+            render_profile=render_profile,
+            debug_export_layers=debug_export_layers,
+            debug_grayscale_morphology=debug_grayscale_morphology,
+            morphology_void_strength=morphology_void_strength,
+            morphology_scar_strength=morphology_scar_strength,
         )
 
 
@@ -153,13 +213,25 @@ def _render_pass_count(cfg: RenderConfig) -> int:
 
 def _render_stage_labels(cfg: RenderConfig) -> list[str]:
     labels = ["background"]
+    if (
+        cfg.features.stars
+        and cfg.features.galaxy_view
+        and cfg.features.cosmic_star_enabled
+    ):
+        labels.append("stars cosmic")
     if cfg.features.nebula and cfg.features.stars and cfg.nebula_mode == NebulaMode.galaxy_streak:
         labels.append("nebula prep")
     if cfg.features.stars:
         labels.append("stars background prep")
+        if cfg.features.galaxy_view and cfg.features.halo_star_enabled:
+            labels.append("stars halo")
         labels.append("stars background")
+        if cfg.features.galaxy_view and cfg.features.star_midlayer_scale > 1e-4:
+            labels.append("stars mid")
     if cfg.features.nebula:
         labels.append("nebula clouds/dust")
+    if cfg.features.galaxy_view and cfg.features.stars:
+        labels.append("unresolved field")
     if cfg.features.stars:
         labels.append("stars foreground prep")
         labels.append("stars foreground")
@@ -180,7 +252,12 @@ def generate(
     width: int = typer.Option(2048, help="Output width for equirectangular renders."),
     height: int = typer.Option(1024, help="Output height for equirectangular renders."),
     output_base_name: str = typer.Option("starsky", help="Base filename prefix."),
-    output_dir: Path = typer.Option(Path("output"), help="Directory for generated images."),
+    output_dir: Path = typer.Option(
+        Path("output"),
+        "--output-dir",
+        "-o",
+        help="Directory for generated images.",
+    ),
     generations: int = typer.Option(1, min=1, help="Number of generations to produce."),
     seed: int | None = typer.Option(None, help="Base random seed for deterministic batches."),
     projection_mode: ProjectionMode = typer.Option(
@@ -247,6 +324,20 @@ def generate(
         "normal",
         help="Diagnostic: normal nebula, occluder-only dust RGB, or continuum-only field (galaxy_streak only).",
     ),
+    render_profile: str = typer.Option(
+        "full",
+        help="Render pipeline: physical | physical_grade | full.",
+    ),
+    debug_export_layers: bool = typer.Option(
+        False, "--debug-layers", help="Write morphology/star/extinction layer PNGs."
+    ),
+    debug_grayscale_morphology: bool = typer.Option(
+        False,
+        "--grayscale-morphology",
+        help="Write grayscale morphology diagnostic PNG.",
+    ),
+    morphology_void_strength: float = typer.Option(0.72, min=0.0, max=1.0),
+    morphology_scar_strength: float = typer.Option(0.68, min=0.0, max=1.5),
 ) -> None:
     if cube and projection_mode == ProjectionMode.equirectangular:
         projection_mode = ProjectionMode.both
@@ -271,7 +362,7 @@ def generate(
             dust_strength=dust_strength,
             debug_pass=nebula_debug_pass,
         ),
-        features=FeatureConfig(
+        features=_feature_config_from_cli(
             stars=stars,
             depth=depth,
             nebula=nebula,
@@ -281,6 +372,11 @@ def generate(
             jpeg_artifact_pass=jpeg_artifact_pass,
             long_exposure_look=long_exposure_look,
             background_texture_strength=background_texture_strength,
+            render_profile=render_profile,
+            debug_export_layers=debug_export_layers,
+            debug_grayscale_morphology=debug_grayscale_morphology,
+            morphology_void_strength=morphology_void_strength,
+            morphology_scar_strength=morphology_scar_strength,
         ),
     )
     cfg.output_dir.mkdir(parents=True, exist_ok=True)
@@ -351,7 +447,12 @@ def assist(
     width: int = typer.Option(2048, help="Output width for equirectangular renders."),
     height: int = typer.Option(1024, help="Output height for equirectangular renders."),
     output_base_name: str = typer.Option("starsky_assist", help="Base filename prefix."),
-    output_dir: Path = typer.Option(Path("output"), help="Directory for generated images."),
+    output_dir: Path = typer.Option(
+        Path("output"),
+        "--output-dir",
+        "-o",
+        help="Directory for generated images.",
+    ),
     rounds: int = typer.Option(5, min=1, max=100, help="Number of manual-guided rounds."),
     candidates_per_round: int = typer.Option(8, min=2, max=64, help="Candidates generated each round."),
     seed: int | None = typer.Option(None, help="Base random seed for deterministic exploration."),

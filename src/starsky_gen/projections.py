@@ -14,6 +14,21 @@ def sph_to_equirect_xy(
     return x, np.clip(y, 0, height - 1)
 
 
+def sph_to_equirect_xy_float(
+    lon: np.ndarray | float,
+    lat: np.ndarray | float,
+    width: int,
+    height: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Fractional equirectangular coordinates prior to quantization (supports bilinear lookups)."""
+    lon = np.asanyarray(lon, dtype=np.float64)
+    lat = np.asanyarray(lat, dtype=np.float64)
+    xf = np.mod(lon / (2.0 * np.pi) * float(width), float(width))
+    yf = (0.5 - (lat / np.pi)) * float(height)
+    yf = np.clip(yf, 0.0, float(height) - 1.0 - 1e-9)
+    return xf.astype(np.float64), yf.astype(np.float64)
+
+
 def cubemap_uv_to_dir(face: str, u: float, v: float) -> np.ndarray:
     if face == "px":
         vec = np.array([1.0, v, -u], dtype=np.float64)
