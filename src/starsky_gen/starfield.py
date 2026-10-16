@@ -27,7 +27,8 @@ from starsky_gen.projections import sph_to_equirect_xy
 STAR_COLOR_NAMES = ["white", "blue", "yellow", "red"]
 STAR_COLOR_WEIGHTS = np.array([0.54, 0.17, 0.16, 0.13], dtype=np.float64)
 STAR_SIZE_NAMES = ["tiny", "small", "medium", "large"]
-STAR_SIZE_WEIGHTS = np.array([0.758, 0.194, 0.032, 0.016], dtype=np.float64)
+# Tiny-heavy cinematic hierarchy: most stars are faint texture; rare medium/large glow.
+STAR_SIZE_WEIGHTS = np.array([0.86, 0.11, 0.02, 0.01], dtype=np.float64)
 
 _LAT_CLIP_LO, _LAT_CLIP_HI = lat_equirect_clip_bounds()
 _MAX_EQUIRECT_LAT = _LAT_CLIP_HI
@@ -40,7 +41,7 @@ _BV_YELLOW_MAX = 0.95
 BASE_COLORS = {
     "white": np.array([0.93, 0.95, 1.00], dtype=np.float64),
     "blue": np.array([0.82, 0.88, 0.98], dtype=np.float64),
-    "yellow": np.array([0.66, 0.64, 0.54], dtype=np.float64),
+    "yellow": np.array([0.72, 0.70, 0.62], dtype=np.float64),
     "red": np.array([0.31, 0.21, 0.19], dtype=np.float64),
 }
 
@@ -262,16 +263,17 @@ def sample_isotropic_cosmic_catalog(
     """Population A: uniform sphere — independent of galactic morphology."""
     area = width * height
     n = max(
-        320,
-        int(area / 40.0 * density_scale * float(np.clip(density_scale_mult, 0.25, 2.5))),
+        48,
+        int(area / 40.0 * density_scale * float(np.clip(density_scale_mult, 0.05, 2.5))),
     )
     lon = rng.uniform(0.0, 2.0 * np.pi, size=n)
     lat = np.arcsin(rng.uniform(-1.0, 1.0, size=n)) * (_MAX_EQUIRECT_LAT / (0.5 * np.pi))
     lat = np.clip(lat, _LAT_CLIP_LO, _LAT_CLIP_HI)
-    size_p = np.array([0.90, 0.095, 0.004, 0.001], dtype=np.float64)
+    # Almost all tiny/cool — sparse cinematic voids, not a busy field.
+    size_p = np.array([0.94, 0.055, 0.004, 0.001], dtype=np.float64)
     size_p /= size_p.sum()
-    color_idx = rng.choice(len(STAR_COLOR_NAMES), size=n, p=np.array([0.62, 0.14, 0.18, 0.06]))
-    bv = np.clip(rng.normal(0.32, 0.24, size=n), -0.25, 1.05)
+    color_idx = rng.choice(len(STAR_COLOR_NAMES), size=n, p=np.array([0.78, 0.16, 0.05, 0.01]))
+    bv = np.clip(rng.normal(0.12, 0.18, size=n), -0.28, 0.55)
     size_idx = rng.choice(len(STAR_SIZE_NAMES), size=n, p=size_p)
     jitter = rng.normal(0.0, 0.012, size=(n, 3))
     keys: dict[str, np.ndarray] = {
@@ -342,14 +344,14 @@ def sample_halo_star_catalog(
     area = width * height
     sig = float(np.clip(halo_lat_sigma, 0.28, 1.05))
     n = max(
-        64,
-        int(area / 195.0 * density_scale * float(np.clip(density_scale_mult, 0.2, 2.0))),
+        24,
+        int(area / 195.0 * density_scale * float(np.clip(density_scale_mult, 0.05, 2.0))),
     )
     lon = rng.uniform(0.0, 2.0 * np.pi, size=n)
     lat = rng.normal(0.0, sig, size=n)
     lat += rng.normal(0.0, 0.06, size=n)
     lat = np.clip(np.tanh(lat * 1.08) * _MAX_EQUIRECT_LAT, _LAT_CLIP_LO, _LAT_CLIP_HI)
-    size_p = np.array([0.72, 0.22, 0.05, 0.01], dtype=np.float64)
+    size_p = np.array([0.88, 0.09, 0.02, 0.01], dtype=np.float64)
     size_p /= size_p.sum()
     bv = np.clip(rng.normal(0.78, 0.26, size=n), 0.22, 1.65)
     warm = rng.random(n) < 0.22
@@ -920,7 +922,9 @@ def star_color(color_name: str, jitter: np.ndarray) -> np.ndarray:
         color = color * 0.90 + neutral * 0.10
         color = color * np.array([0.96, 0.98, 1.02], dtype=np.float64)
     else:
-        color = color * 0.88 + neutral * 0.12
+        color = color * 0.94 + neutral * 0.06
+    lu = float(np.mean(color))
+    color = lu + (color - lu) * 1.22
     return np.clip(color, 0.0, 1.0)
 
 
@@ -1070,7 +1074,7 @@ def paint_star(
                 mid_u = float(np.clip((d - core) / span, 0.0, 1.0))
                 mid_peak = 4.0 * mid_u * (1.0 - mid_u)
                 white_w = float(
-                    np.clip(0.06 + 0.38 * h_frac + 0.30 * mid_peak, 0.0, 0.78)
+                    np.clip(0.03 + 0.14 * h_frac + 0.12 * mid_peak, 0.0, 0.28)
                 )
                 luma = float(np.clip(np.mean(color_rgb), 0.0, 1.0))
                 neutral = np.full(3, min(1.0, luma * 1.07 + 0.025), dtype=np.float64)
@@ -1110,6 +1114,60 @@ def paint_star(
 
     if radius >= 3:
         _paint_thin_diffraction_spikes(img, x, y, radius, color_rgb, rng)
+
+
+def cull_catalog_to_plane(
+    catalog: dict[str, np.ndarray],
+    rng: np.random.Generator,
+    *,
+    width: int,
+    height: int,
+    disk_weight: np.ndarray | None,
+    gate_power: float = 2.35,
+    keep_floor: float = 0.04,
+    min_keep: int = 48,
+) -> dict[str, np.ndarray]:
+    """Stochastically drop high-latitude stars using disk_weight**power (cinematic plane gate)."""
+    from starsky_gen.projections import sph_to_equirect_xy
+
+    n = int(np.asarray(catalog["lon"]).shape[0])
+    if n < 1:
+        return catalog
+    pw = float(np.clip(gate_power, 1.0, 4.5))
+    floor = float(np.clip(keep_floor, 0.0, 0.35))
+    xs, ys = sph_to_equirect_xy(catalog["lon"], catalog["lat"], int(width), int(height))
+    yi = np.clip(ys.astype(np.int64), 0, int(height) - 1)
+    xi = np.mod(xs.astype(np.int64), int(width))
+    if disk_weight is not None:
+        dw = np.clip(np.asarray(disk_weight, dtype=np.float64), 0.0, 1.0)
+        if dw.shape == (int(height), int(width)):
+            host = dw[yi, xi]
+        elif dw.ndim == 1 and dw.shape[0] == int(height):
+            host = dw[yi]
+        else:
+            host = np.exp(-((np.asarray(catalog["lat"], dtype=np.float64) / 0.14) ** 2))
+    else:
+        host = np.exp(-((np.asarray(catalog["lat"], dtype=np.float64) / 0.14) ** 2))
+    keep_p = np.clip(host**pw, floor, 1.0)
+    keep = rng.random(n) < keep_p
+    if int(np.sum(keep)) < int(min_keep) and n >= int(min_keep):
+        # Always retain the brightest midplane candidates if cull was too aggressive.
+        score = host * keep_p
+        if "phot_mag" in catalog:
+            score = score * np.clip(10.0 ** (-0.4 * (catalog["phot_mag"] - 12.0)), 0.2, 8.0)
+        order = np.argsort(-score)
+        keep = np.zeros(n, dtype=bool)
+        keep[order[: int(min_keep)]] = True
+    if bool(np.all(keep)):
+        return catalog
+    out: dict[str, np.ndarray] = {}
+    for key, val in catalog.items():
+        arr = np.asarray(val)
+        if arr.shape[0] == n:
+            out[key] = arr[keep]
+        else:
+            out[key] = val
+    return out
 
 
 def catalog_stats(catalog: dict[str, np.ndarray]) -> StarStats:

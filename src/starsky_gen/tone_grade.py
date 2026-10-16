@@ -33,6 +33,8 @@ from starsky_gen.tone_map import (
     disk_reinhard_rgb_grade,
 )
 
+from starsky_gen.config import LookTarget
+
 if TYPE_CHECKING:
     from starsky_gen.config import FeatureConfig
 
@@ -199,38 +201,6 @@ def apply_galaxy_scene_tone(
     comp = np.maximum(canvas, 0.0) ** 1.22
     m = (dw * hi)[..., np.newaxis]
     canvas = np.maximum(canvas * (1.0 - m) + comp * m, 0.0)
-    # #region agent log
-    import json
-    import time
-    from pathlib import Path
-
-    _lp = Path(__file__).resolve().parents[2] / ".cursor" / "debug-408793.log"
-    _bm = np.clip(dw, 0, 1) > 0.35
-    if bool(np.any(_bm)):
-        _b = lu[_bm]
-        try:
-            with _lp.open("a", encoding="utf-8") as _fh:
-                _fh.write(
-                    json.dumps(
-                        {
-                            "sessionId": "408793",
-                            "hypothesisId": "H",
-                            "location": "tone_grade.py:apply_galaxy_scene_tone",
-                            "message": "post tone map band stats",
-                            "data": {
-                                "p50": float(np.percentile(_b, 50)),
-                                "p95": float(np.percentile(_b, 95)),
-                                "std": float(np.std(_b)),
-                            },
-                            "timestamp": int(time.time() * 1000),
-                            "runId": __import__("os").environ.get("STK_DEBUG_RUN", "pre"),
-                        }
-                    )
-                    + "\n"
-                )
-        except OSError:
-            pass
-    # #endregion
     return canvas
 
 
@@ -248,9 +218,13 @@ def apply_galaxy_linear_grade_pipeline(
 ) -> np.ndarray:
     """Linear scene → optional lens vignette → tone map → ISP → noise → display finish."""
     canvas = np.maximum(rgb.astype(np.float64), 0.0)
+    vignette_scale = 0.42
+    if getattr(features, "look_target", None) == LookTarget.cinematic:
+        # Frame-centric vignette fights wrap-safe skyboxes; keep only a light falloff.
+        vignette_scale *= 0.55
     if features.optics_before_tone_map and float(features.vignette_strength) > 1e-6:
         canvas = apply_lens_vignette(
-            canvas, strength=float(features.vignette_strength) * 0.42
+            canvas, strength=float(features.vignette_strength) * vignette_scale
         )
     canvas = apply_galaxy_scene_tone(
         canvas,
@@ -304,8 +278,8 @@ def apply_galaxy_display_finish(
     canvas = apply_split_toning(
         canvas,
         strength=features.split_toning_strength,
-        warm_high=(1.01, 1.005, 1.03),
-        cool_shadow=(0.99, 0.995, 1.02),
+        warm_high=(1.025, 1.01, 0.98),
+        cool_shadow=(0.96, 0.98, 1.045),
     )
     lift = float(features.shadow_lift)
     if star_overlay_pending:
@@ -322,6 +296,8 @@ def apply_galaxy_display_finish(
             periodic_x=periodic_x,
         )
     scatter = 0.018 if not star_overlay_pending else 0.0
+    if getattr(features, "look_target", None) == LookTarget.cinematic:
+        scatter *= 0.45
     if scatter > 1e-6:
         canvas = apply_atmospheric_scatter(canvas, strength=scatter)
     canvas = apply_optical_display_pass(

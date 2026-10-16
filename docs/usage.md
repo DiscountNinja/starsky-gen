@@ -6,9 +6,40 @@
 starsky-gen
 ```
 
-Defaults: `--nebula-mode galaxy_streak`, `--output-format png`, `--quality 100`, `--projection-mode equirectangular`.
+Defaults: `--look-target cinematic`, `--flat-exposure`, `--nebula-mode galaxy_streak`, `--output-format png`, `--quality 100`, `--projection-mode equirectangular`.
 
-Background is a noisy bluish-gray field that darkens away from the galactic disk unless you pass `--black-background`.
+Background is a noisy bluish-gray field that darkens away from the galactic disk unless you pass `--black-background`. Cinematic look keeps grain near zero and bloom/tone elevated for wrap-safe game vistas.
+
+### Guided / discovery mode (default when no flags)
+
+```bash
+starsky-gen                 # guided (no other flags)
+starsky-gen generate
+starsky-gen --width 4096    # not guided: flag → args + defaults for the rest
+starsky-gen --no-guided     # skip prompts explicitly
+starsky-gen --guided --seed 7   # force guided; seed pre-fills the prompt default
+```
+
+Walks generate options interactively when you pass **no** CLI flags (newbie-friendly / discovery). If you pass any flag, guided is skipped and unset options keep their normal defaults. **Enter** keeps the current/default at every guided step — spam Enter for a full default run.
+
+1. **Size preset** — 2K (2048×1024), 4K (4096×2048), 8K (8192×4096), or custom `--width` / `--height`
+2. **Output type** — equirectangular, cubemap, or both (`--projection-mode`)
+3. **Core options** — each prompt shows the matching CLI flag and a short help line
+4. **Advanced?** `[y/N]` — optional debug / morphology / profile knobs
+5. Prints a short **summary** plus an **equivalent command** you can reuse without `--guided`
+6. **Start render?** `[Y/n]` — choose `n` to exit after discovery (no images written)
+
+Type `q` at any prompt to cancel. You can still pass flags with `--guided`; those values become the defaults shown in prompts.
+
+### Local copyright and license (optional)
+
+Before generate runs, starsky-gen may ask for copyright / distribution status to embed in PNG (and JPEG Copyright) metadata:
+
+1. **C**opyrighted / **O**pen / **U**nknown (Enter = Unknown)
+2. If **O** or **U** — no further prompts; both Copyright and License metadata use `open` / `unknown`
+3. If **C** — asks **distribution rights / license** (free text, e.g. `All Rights Reserved`, `CC BY 4.0`), then an **optional copyright holder** name (Enter → `© YEAR` only)
+
+Reminder prompts for copyrighted/open appear every 20 runs. The local YAML `.license` file stores status, optional holder, year, `distribution_rights`, run count, and last seed / look target; it is gitignored.
 
 Equivalent module invocation:
 
@@ -43,12 +74,39 @@ Nebula modes:
 - `full` — immersive fog
 - `galaxy_streak` — Milky-Way-like plane (default)
 
-## Photoreal and display tuning
+## Look target and display tuning
 
-Galaxy renders use magnitude-based background stars by default (`--photoreal-stars`). Key knobs:
+Primary product look is **cinematic** (AAA wrap-safe skybox). Documentary/photo grading is opt-in:
 
+```bash
+starsky-gen --look-target cinematic   # default: filmic, bloom up, grain down, flat exposure
+starsky-gen --look-target documentary # parked photo/long-exposure stack
+```
+
+Galaxy renders still use magnitude-based PSF stars by default (`--photoreal-stars`) for sharp, realistic color — that is not the same as a documentary camera grade.
+
+### Look recipes (cinematic vs documentary)
+
+`finalize_render_config()` applies a look recipe, then the Milky Way recognition preset. Shared morphology/extinction/PSF stay available under both targets; the sandwich *composite* path differs:
+
+| Knob | Cinematic | Documentary |
+|------|-----------|-------------|
+| `lane_star_dropout_boost` | moderate (~0.55) | **0** |
+| `post_star_lane_protect_strength` | soft (~0.48; midplane glow OK) | **0** |
+| `dark_rift_strength` | on (~0.78+) | **0** |
+| `star_layer_bloom_strength` / `star_psf_bloom_scale` | stronger hero bloom | **0** / lower |
+| `structure_type_competition` | competitive types | **0** (soft blend) |
+| Tone / grain / bloom | filmic, bloom up, grain down, shadow lift | asinh + long-exposure / ISP stack |
+
+Cinematic prioritizes **volumetric glow + color hierarchy** (warm cores, cooler shells, void windows, soft BandPlan shoulders) over a strict dark-lane mid&lt;shell sandwich. BandPlan still drives protect/rifts; `--debug-layers` exports `band_plan_lane.png`, `band_plan_rift.png`, `band_plan_protect.png`, and `band_plan_shell.png`. Documentary zeros sandwich leftovers. Advanced `FeatureConfig` fields remain for manual override.
+
+Key knobs:
+
+- `--look-target` (`cinematic|documentary`)
+- `--noheroes` — disable procedural hero stars (spikes / lens ghosts) while iterating
+- `--long-exposure-look` / `--flat-exposure` (default flat; documentary enables long-exposure)
 - `--mag-bright`, `--mag-faint`, `--band-star-density`
-- `--asinh-gain`, `--asinh-q`, `--galaxy-tone-curve`
+- `--asinh-gain`, `--asinh-q`, `--galaxy-tone-curve` (`reinhard|asinh|filmic|aces|acescct`; default `filmic`)
 - `--disk-star-density-dropout` — thin resolved stars in the bright plane
 - `--star-band-chroma-desat`, `--star-band-brightness-scale` — plane star look
 - `--render-profile physical` — linear physical composite only (no display finish)
@@ -64,7 +122,147 @@ starsky-gen --seed 42 --debug-layers -o output
 starsky-gen --seed 42 --debug-layers --grayscale-morphology -o output
 ```
 
-Writes `output/<output-base-name>_layers/` with PNGs such as `density_G.png`, `dust_D.png`, `unresolved_U.png`, `resolve_W.png`, `dropout_mask.png`, `extinction.png`, `obliteration_mask.png`, `brutal_erasure_mask.png`, `structure_survival.png`, `gold_population_weight.png`, and `resolved_stars.png`.
+Writes `output/<output-base-name>_layers/` with PNGs such as `density_G.png`, `dust_D.png`, `unresolved_U.png`, `resolve_W.png`, `dropout_mask.png`, `extinction.png`, `obliteration_mask.png`, `brutal_erasure_mask.png`, `structure_survival.png`, `gold_population_weight.png`, `resolved_stars.png`, and (when BandPlan is built) `band_plan_lane.png` / `band_plan_rift.png` / `band_plan_protect.png` / `band_plan_shell.png`.
+
+### Structure architecture (weight / type system)
+
+Galactic morphology uses two layers:
+
+- **Content** — what clouds look like at different scales (`puff_field`, `vertical_extent`, `latent_turb`, competitive mega/med/small/fine in dust microstructure).
+- **Plan** — where each mechanism runs, via `StructureArchitectureWeights` in `structure_envelope.py` (`build_structure_architecture_weights` → `apply_structure_architecture_pipeline`).
+
+**Sandwich model (Milky Way–like):** the band is split into a **tight inner dust lane** (dark sub-band on the mid-plane) and a **puff shell** (fluffy ISM above and below). **Negative space** is carved in the shell as clearer transmission pockets between clouds — not empty black off the band, but gaps inside the luminous layer.
+
+Config knobs (on `FeatureConfig` / generator):
+
+| Field | Role |
+|-------|------|
+| `structure_architecture_strength` | Global drive for the architecture pipeline (default `1.0`) |
+| `structure_band_core_drive` | Minimum turbulent drive inside the band core, not only rims (default `0.52`) |
+| `structure_inner_dust_lane_strength` | Inner dust sub-band absorption (default `0.72`) |
+| `structure_vertical_extent` | Vertical envelope / plume strength |
+| `structure_host_latitude_scale` | How far structure may extend above/below the plane |
+
+**Grayscale architecture layers**
+
+| File | Meaning |
+|------|---------|
+| `turbulence_architecture.png` | Master drive — where turbulent architecture should show through (bright = active) |
+| `architecture_puff_W.png` | Puff (cotton-ball) injection weight |
+| `architecture_reinject_W.png` | Reinject (fragments / tears) weight |
+| `architecture_dust_lane.png` | Inner dust sub-band weight |
+| `architecture_negative_space.png` | Clear pockets in the puff shell |
+
+**`structure_type_map.png` (RGB type map)**
+
+Colored debug view of which architecture **type** dominates each pixel (sharpened weighted blend). Use this when tuning band fluff vs etched cores; a single grayscale weight map does not show type competition.
+
+| Color | Type | Mechanism |
+|-------|------|-----------|
+| Red-brown | Dust lane | Inner sub-band — dense absorption on mid-plane |
+| Cyan | Puff | `build_fine_puff_field` + puff inject (mostly shell) |
+| Green | Vertical | `vertical_extent` plumes (shell + plumes) |
+| Magenta | Reinject | `reinject_vertical_dust_structure` fragments |
+| Yellow | Turb | Latent turbulence high-frequency |
+| Brown | Survival | `structure_survival` host |
+| Pale gray | Negative space | Clear gaps in puff shell (`apply_band_negative_space_transmission`) |
+| Dark blue-gray | Low drive | `turbulence_drive` below threshold — architecture barely applied |
+
+**How to read it**
+
+- Mid-plane should show **red-brown dust lane** (inner sub-band), with **cyan/green** above and below (puff shell) — sandwich, not one muddy blend.
+- **Pale patches** in the shell = negative space (good if you want Milky-Way-like gaps between clouds).
+- Band **core** should not be mostly dark blue-gray (low drive → flat `dust_A`).
+- Compare to `dust_A.png` (morph only) and `dust_A_effective.png` (after extinction merge). If effective is fluffier, the final grade/extinction path is helping; raise `structure_band_core_drive` or `structure_architecture_strength` to push that into morph.
+- Matching a Milky Way reference (final composite) requires `extinction.png` and the final equirect, not `disk_weight` or `dust_D` alone.
+
+Scale hierarchy types (mega / medium / small / fine) are **not** shown on this map yet; they live in dust microstructure / ISM hierarchy passes.
+
+## Toward Milky Way (3-second read)
+
+Older **main**-branch renders (`92ac1fe` photoreal pipeline) often passed a quick “is that the Galactic plane?” test. The **failed** morphology branch adds structure fidelity (architecture weights, dust lane, debug maps) but can lose **legibility** if the composite is tuned like a nebula still frame — brown haze, soft edges, stars buried.
+
+Image 3 (reference) reads fast because of **four simultaneous cues**, not one map:
+
+1. **Dark dust sub-band** on the mid-plane (sandwich lane).
+2. **Bright star carpet** above and below the lane (not a smooth glow blob).
+3. **Warm ISM** with **gaps** (negative space) in the shell.
+4. **Sparse red** H II — rare pockets only.
+
+### What regressed vs “good” versions
+
+| Symptom now | Likely cause |
+|-------------|----------------|
+| Monolithic brown/red haze | `galactic_band_color_grade` + heavy blur in `_apply_band_ism_dominance` when `preserve_detail=False` |
+| No obvious lane | Lane must appear in **`extinction.png`** and final grade, not only `dust_A` / type map |
+| Stars invisible in band | `band_ism_dominance` + plane star dropout + ISM lift without `preserve_detail` on morph ISM |
+| Muddy type map | Types blending; tune `structure_inner_dust_lane_strength`, re-export `structure_type_map.png` |
+
+Structure work (architecture, puff shell, dust lane) is **necessary** but **not sufficient** — the 3-second read is won in the **composite + display** stack.
+
+### Diagnostic order (fastest path)
+
+1. `extinction.png` — dark filamentary lane on mid-plane?
+2. `resolved_stars.png` + final equirect — stars visible in shell, lane darker?
+3. `structure_type_map.png` — red-brown lane stripe, cyan/green shell, pale gaps?
+4. `dust_D_effective.png` vs `dust_A.png` — effective should show lane + fluffy shell
+
+### Milky Way recognition preset (on by default)
+
+For `nebula_mode=galaxy_streak`, `milky_way_recognition_preset=True` (default) applies a tuned floor at render start via `apply_milky_way_recognition_preset()` — stronger lane/architecture, more ISM lift + dark patches, more plane stars. Under `--look-target cinematic` it also allows darker dust lanes (vista sandwich); documentary keeps milder color-grade caps. Set `milky_way_recognition_preset=False` to use only the scalar defaults in `FeatureConfig`.
+
+### Cinematic vista smoke checklist
+
+After retuning look defaults, verify a seeded render still passes a 3-second read:
+
+```bash
+starsky-gen --seed 42 --look-target cinematic --debug-layers \
+  -o output/vista_check --output-base-name vista
+```
+
+Check:
+
+1. Final equirect — dark mid-plane dust lane, warm ISM with gaps (not a smooth sepia slab)
+2. Varied star sizes / a few hero blooms (not one white pinprick size)
+3. `structure_type_map.png` — red-brown lane + cyan/green puff shell
+4. `extinction.png` — filamentary dark lane on the mid-plane
+5. Wrap-safe — no frame vignette skew; flat exposure still default
+
+### Suggested knob bundle (Python / `FeatureConfig`)
+
+Defaults now lean toward this bundle; override individual fields or disable the preset above:
+
+| Field | Direction | Why |
+|-------|-----------|-----|
+| `morphology_dust_primary` | `True` | Morph-led extinction + `build_morphology_ism_layers` with `preserve_detail` |
+| `band_ism_dominance` | `0.52`–`0.68` | Diffuse ISM visible, but don’t drown stars |
+| `band_dark_patch_strength` | `0.48`–`0.70` | Dark lanes in the luminous band |
+| `structure_inner_dust_lane_strength` | `0.82`–`0.95` | Inner dust sub-band in morph |
+| `structure_architecture_strength` | `1.12`–`1.20` | Full architecture pipeline |
+| `galactic_band_separation_strength` | `1.18`–`1.30` | Cloud/lane gaps (also `apply_band_luma_separation` late in generator) |
+| `galactic_band_dust_black_strength` | `0.62`–`0.92` | Near-black dust carve (cinematic vista) |
+| `galactic_band_color_grade_strength` | `0.58`–`0.72` | Lower if final image is one brown wash |
+| `display_bloom_strength` | `0.09`–`0.11` | Hero/hot-core bloom; keep `bloom_mix_wide` low |
+| `galactic_band_gas_fluff_strength` | `0.85`–`1.0` | Puffy shell pockets |
+| `disk_star_density_dropout` | `0.35`–`0.48` | Keep stars in the plane |
+| `split_star_display_grade` | `True` | Sharper stars on graded nebula |
+| `morphology_extinction_lane_carve` | `0.85`+ | Lane shows in `ext_paint` |
+| `extinction_void_floor` | `0.006`–`0.012` | Deep lanes without slabbing all detail |
+
+**A/B profiles**
+
+- `--render-profile physical_grade` — drop late display mush; check structure + stars.
+- `--render-profile full` — production look; compare to physical_grade to see what display passes cost you.
+
+**Temporary isolation**
+
+- Set `galactic_band_color_grade=False` in config for one render: if it suddenly “passes 3 seconds,” the morph/extinction stack is fine and the **final grade** needs tuning, not more FBM.
+
+### What to build next (code)
+
+1. **Scale type map** (mega/med/small/fine) alongside architecture RGB map.
+2. **Couple scale hierarchy → `turbulence_drive`** so fine detail survives all passes.
+3. **Export `extinction.png` vs lane mask overlay** in debug layers for side-by-side lane check.
 
 Nebula-only diagnostics:
 

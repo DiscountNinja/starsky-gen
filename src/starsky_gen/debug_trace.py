@@ -8,8 +8,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_SESSION = os.environ.get("STARSKY_DEBUG_SESSION", "408793")
+_SESSION = os.environ.get("STARSKY_DEBUG_SESSION", "25d23f")
 _DEBUG_LOG = Path(
     os.environ.get(
         "STARSKY_DEBUG_LOG",

@@ -154,9 +154,10 @@ def adjust_teffective_for_population(
     hot_young = young & (t < 9600.0) & (u < hot_p)
     out = np.where(hot_young, rng.uniform(9200.0, 19500.0, size=t.shape[0]), out)
     u2 = rng.random(t.shape[0])
-    cool_p = np.clip(0.38 + 0.58 * np.clip(gp - 0.42, 0.0, 1.0), 0.0, 0.88)
-    cool_mature = mature & (out > 7600.0) & (u2 < cool_p)
-    out = np.where(cool_mature, rng.uniform(4000.0, 6200.0, size=t.shape[0]), out)
+    cool_p = np.clip(0.22 + 0.28 * np.clip(gp - 0.42, 0.0, 1.0), 0.0, 0.55)
+    cool_mature = mature & (out > 8200.0) & (u2 < cool_p)
+    # Keep mature stars warm-white / soft G-type, not deep gold K islands.
+    out = np.where(cool_mature, rng.uniform(5200.0, 7000.0, size=t.shape[0]), out)
     return out.astype(np.float64)
 
 
@@ -175,7 +176,8 @@ def adjust_bv_for_population(
     jitter = rng.normal(0.0, 0.04, size=b.shape[0])
     shift = np.zeros_like(b)
     shift = np.where(young, shift - (0.10 + 0.22 * (1.0 - gp)), shift)
-    shift = np.where(old, shift + (0.08 + 0.32 * gp), shift)
+    # Mild warm bias only — strong +BV was painting saturated gold star islands.
+    shift = np.where(old, shift + (0.04 + 0.12 * gp), shift)
     return np.clip(b + shift + jitter, -0.35, 2.1).astype(np.float64)
 
 
@@ -189,12 +191,12 @@ def warm_teffective_for_core_bulge(
     if cg < 0.10:
         return float(teff_k)
     t = float(teff_k)
-    if cg > 0.50 and t > 6200.0:
-        return float(rng.uniform(4400.0, 6000.0))
-    if cg > 0.30 and t > 7200.0 and rng.random() < 0.82 + 0.15 * cg:
-        return float(rng.uniform(4600.0, 6400.0))
-    if cg > 0.18 and t > 8800.0 and rng.random() < 0.65 * cg:
-        return float(rng.uniform(4800.0, 6600.0))
+    if cg > 0.55 and t > 7000.0:
+        return float(rng.uniform(5400.0, 6800.0))
+    if cg > 0.35 and t > 8200.0 and rng.random() < 0.55 + 0.20 * cg:
+        return float(rng.uniform(5600.0, 7200.0))
+    if cg > 0.22 and t > 10000.0 and rng.random() < 0.40 * cg:
+        return float(rng.uniform(5800.0, 7600.0))
     return t
 
 
@@ -243,7 +245,8 @@ def attenuate_chroma_multipliers(
 ) -> tuple[float, float, float]:
     """Blend per-channel RGB factors toward neutral (1, 1, 1)."""
     w = float(np.clip(weight, 0.0, 1.0))
-    return tuple(1.0 + (float(f) - 1.0) * w for f in factors)
+    scaled = tuple(1.0 + (float(f) - 1.0) * w for f in factors)
+    return (float(scaled[0]), float(scaled[1]), float(scaled[2]))
 
 
 def star_rgb_from_teffective(
@@ -258,9 +261,11 @@ def star_rgb_from_teffective(
     peak = float(np.max(rgb))
     if peak > 1e-10:
         rgb = rgb / peak
-    rgb = rgb * 0.975 + float(np.mean(rgb)) * 0.025
+    rgb = rgb * 0.96 + float(np.mean(rgb)) * 0.04
     if camera:
         rgb = apply_camera_response_linear(rgb)
+    lu = float(np.mean(rgb))
+    rgb = lu + (rgb - lu) * 1.28
     return np.clip(rgb, 0.0, 1.0)
 
 

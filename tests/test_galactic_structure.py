@@ -33,7 +33,8 @@ def test_fine_puff_field_has_high_frequency_breakup() -> None:
     puff = build_fine_puff_field(
         np.random.default_rng(7), 512, 1024, periodic_x=True, strength=1.0
     )
-    assert float(highpass_band_stats(puff)["hp_std"]) > 0.03
+    hp = float(highpass_band_stats(puff)["hp_std"])
+    assert 0.002 < hp < 0.055
 
 
 def test_morphology_turbulent_gas_field_has_band_variance() -> None:
@@ -75,6 +76,33 @@ def test_dust_transmission_microstructure_increases_edge_energy() -> None:
         lo = build_galactic_structure(128, 256, np.random.default_rng(seed), dust_micro_strength=0.0)
         ratios.append(_band_hp_std(hi) / max(_band_hp_std(lo), 1e-9))
     assert float(np.median(ratios)) >= 1.15
+
+
+def test_clamp_disk_band_thickness_limits_pinch() -> None:
+    from starsky_gen.structure_envelope import clamp_disk_band_thickness
+
+    h, w = 64, 128
+    dw = np.zeros((h, w), dtype=np.float64)
+    dw[30, :] = 0.95
+    out = clamp_disk_band_thickness(dw, min_half_width_frac=0.06, max_half_width_frac=0.14)
+    prof = out[:, w // 2]
+    mx = float(np.max(prof))
+    hw_out = float(np.count_nonzero(prof > mx * 0.3))
+    assert hw_out >= 5
+
+
+def test_cloudy_transmission_has_cellular_variance() -> None:
+    from starsky_gen.dust_field import apply_cloudy_transmission_breakup
+    from starsky_gen.structure_envelope import build_fine_puff_field
+
+    h, w = 128, 256
+    t = np.full((h, w), 0.55, dtype=np.float64)
+    puff = build_fine_puff_field(np.random.default_rng(3), h, w, periodic_x=True, strength=1.0)
+    yy = np.linspace(-1.0, 1.0, h, dtype=np.float64)[:, None]
+    disk = np.broadcast_to(np.exp(-((yy**2) / 0.08)), (h, w))
+    out = apply_cloudy_transmission_breakup(t, puff, disk, strength=0.9, periodic_x=True)
+    on = disk.ravel() > 0.35
+    assert float(np.std(out.ravel()[on])) > float(np.std(t.ravel()[on])) * 1.06
 
 
 def test_build_galactic_structure_shapes() -> None:

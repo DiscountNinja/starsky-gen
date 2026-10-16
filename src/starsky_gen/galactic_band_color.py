@@ -17,11 +17,16 @@ def _ratio(rgb: tuple[float, float, float] | np.ndarray) -> np.ndarray:
 
 
 # Stellar-population palette (Rec.709 luminance-normalized ratios).
-_GOLD_OLD = _ratio((1.06, 0.90, 0.62))
-_GOLD_WHITE = _ratio((1.05, 0.97, 0.84))
-_DUST_BROWN = _ratio((0.62, 0.40, 0.22))
-_DUST_BLACK = _ratio((0.14, 0.08, 0.06))
-_HII_RED = _ratio((1.34, 0.30, 0.18))
+_GOLD_OLD = _ratio((1.04, 0.92, 0.72))
+_GOLD_WHITE = _ratio((1.02, 0.99, 0.92))
+_GOLD_WARM = _ratio((1.01, 0.98, 0.88))
+_DUST_BROWN = _ratio((0.46, 0.42, 0.36))
+_DUST_BLACK = _ratio((0.12, 0.11, 0.10))
+_HII_RED = _ratio((1.42, 0.28, 0.16))
+_HII_ORANGE = _ratio((1.28, 0.52, 0.22))
+_COOL_SHELL = _ratio((0.72, 0.82, 1.08))
+_WARM_CORE = _ratio((1.18, 0.78, 0.48))
+_GOLD_AMBER = _ratio((1.22, 0.92, 0.42))
 
 
 def _sparse_peak_mask(
@@ -55,10 +60,11 @@ def _structure_lane_weight(
 ) -> np.ndarray:
     """Morphology-driven lane weight — avoids a smooth Gaussian donut at band center."""
     med = np.clip(blur_fn(gas_struct, passes=2, periodic_x=periodic_x), 0.0, 1.0)
-    hf = np.clip((gas_struct - med * 0.78) * 2.4, 0.0, 1.0) ** 1.08
-    struct = np.clip(0.34 * gas_struct + 0.66 * hf, 0.0, 1.0)
+    hf = np.clip((gas_struct - med * 0.78) * 2.5, 0.0, 1.0) ** 1.06
+    struct = np.clip(0.30 * gas_struct + 0.70 * hf, 0.0, 1.0)
     if xx is not None:
-        smooth_blob = np.exp(-(xx**2) / 0.13) * lane_dark * (1.0 - hf)
+        lane_mid = np.exp(-(xx**2) / 0.13) * lane_dark
+        smooth_blob = lane_mid * (1.0 - hf) ** 1.4
         struct = np.clip(struct * (1.0 - smooth_blob * 0.68), 0.0, 1.0)
     bias = float(np.clip(inner_bias, 0.0, 1.2))
     return np.clip(struct * plane * (0.64 + 0.36 * bias), 0.0, 1.12)
@@ -201,7 +207,7 @@ def _turbulent_black_dust(
     # Gas body: allow crushing bright ISM, not sky or stars.
     ism = np.clip((lu_out - 0.032) / 0.048, 0.0, 1.0)
     ism = ism * np.clip(1.0 - (lu_out - 0.88) / 0.12, 0.0, 1.0) ** 0.65
-    carve = obscure * ism * (1.0 - pointness * 0.90) * st
+    carve = obscure * ism * (1.0 - pointness * 0.97) * st
     if float(np.max(carve)) < 1e-6:
         return out
 
@@ -392,6 +398,165 @@ def apply_band_luma_separation(
     return remap_luma_preserving_chroma(lin, np.clip(lu_sep, 0.0, 1.0))
 
 
+def suppress_gold_chroma_islands(
+    canvas: np.ndarray,
+    disk_w: np.ndarray,
+    *,
+    strength: float = 0.85,
+    periodic_x: bool = True,
+    blur_fn: Callable[..., np.ndarray] | None = None,
+) -> np.ndarray:
+    """Strip jagged gold chroma dashes — especially on band shoulders.
+
+    Midplane ``disk_weight`` alone is the wrong gate: shoulder flecks sit where
+    plane is low, so a plane-gated kill misses them. Use a wide band host and
+    extra shoulder pressure.
+    """
+    s = float(np.clip(strength, 0.0, 1.0))
+    if s < 1e-6:
+        return np.asarray(canvas, dtype=np.float64)
+    out = np.maximum(np.asarray(canvas, dtype=np.float64), 0.0)
+    h, w = int(out.shape[0]), int(out.shape[1])
+    dw = np.clip(np.asarray(disk_w, dtype=np.float64), 0.0, 1.0)
+    if dw.ndim == 1:
+        dw = dw[:, None]
+    if dw.shape != (h, w):
+        dw = np.broadcast_to(dw, (h, w))
+    if blur_fn is None:
+        from starsky_gen.nebula import _blur_separable_xy
+
+        blur_fn = _blur_separable_xy
+    from starsky_gen.structure_envelope import soften_band_envelope
+
+    # Wide host so shoulder latitudes still get the kill.
+    from starsky_gen.structure_envelope import midplane_gold_lat_gate
+
+    wide = soften_band_envelope(dw, (h, w), periodic_x=periodic_x, lat_blur_sigma=22.0, power=0.42)
+    wide = np.clip(wide, 0.0, 1.0)
+    core = np.clip(dw**1.35, 0.0, 1.0)
+    lat_core = midplane_gold_lat_gate(h, sigma=0.10, power=1.70)
+    if lat_core.shape != (h, w):
+        lat_core = np.broadcast_to(lat_core, (h, w))
+    # Shoulder pressure: band envelope but off the razor midplane (lat + disk).
+    shoulder = np.clip(wide * (1.0 - core * 0.70) * (1.0 - lat_core * 0.85), 0.0, 1.0)
+    lu = rec709_luma(out)
+    lu_blur = blur_fn(lu, passes=2, periodic_x=periodic_x)
+    pointness = np.clip((lu - lu_blur) / np.maximum(lu, 1e-6), 0.0, 1.0) ** 0.9
+    star_protect = np.clip(pointness / 0.07, 0.0, 1.0) ** 1.45
+    gold_ex = np.clip(out[..., 0] - np.maximum(out[..., 1], out[..., 2]) * 1.04, 0.0, None)
+    gold_soft = blur_fn(gold_ex, passes=5, periodic_x=periodic_x)
+    gold_hf = np.clip(gold_ex - gold_soft * 0.72, 0.0, None)
+    body = np.clip((lu - 0.04) / 0.18, 0.0, 1.0)
+    gate = (0.55 * wide + 0.90 * shoulder) * (1.0 - star_protect) * body
+    # HF streaks + any residual gold excess on shoulders.
+    kill = (gold_hf * 1.15 + gold_ex * shoulder * 0.55) * gate * s
+    kill = np.clip(kill, 0.0, gold_ex)
+    out[..., 0] = np.maximum(0.0, out[..., 0] - kill)
+    out[..., 1] = out[..., 1] + kill * 0.48
+    out[..., 2] = out[..., 2] + kill * 0.22
+    # Soft midplane: compress remaining gold peaks toward warm (not yellow).
+    gold_ex2 = np.clip(out[..., 0] - np.maximum(out[..., 1], out[..., 2]) * 1.04, 0.0, None)
+    peak = np.clip(gold_ex2 - gold_soft * 0.90, 0.0, None)
+    peak_kill = peak * (0.40 + 0.60 * wide) * (1.0 - star_protect) * 0.70 * s
+    out[..., 0] = np.maximum(0.0, out[..., 0] - peak_kill)
+    out[..., 1] = out[..., 1] + peak_kill * 0.40
+
+    # Thin horizontal dashes (1–2 px tall gold runs): kill when above/below are cooler.
+    gold_ex3 = np.clip(out[..., 0] - np.maximum(out[..., 1], out[..., 2]) * 1.04, 0.0, None)
+    above = np.roll(gold_ex3, 1, axis=0)
+    below = np.roll(gold_ex3, -1, axis=0)
+    above[0, :] = gold_ex3[0, :]
+    below[-1, :] = gold_ex3[-1, :]
+    vert_max = np.maximum(above, below)
+    thin = np.clip(gold_ex3 - vert_max * 1.15, 0.0, None)
+    thin_gate = (1.0 - star_protect) * np.clip(wide + shoulder, 0.0, 1.0) * body
+    thin_kill = thin * thin_gate * (1.15 * s)
+    out[..., 0] = np.maximum(0.0, out[..., 0] - thin_kill)
+    out[..., 1] = out[..., 1] + thin_kill * 0.50
+    out[..., 2] = out[..., 2] + thin_kill * 0.25
+    return np.clip(out, 0.0, 1.0).astype(np.float64)
+
+
+def apply_core_multi_scatter_glow(
+    canvas: np.ndarray,
+    *,
+    opaque_core: np.ndarray,
+    disk_w: np.ndarray,
+    void_mask: np.ndarray | None,
+    strength: float,
+    periodic_x: bool,
+    blur_fn: Callable[..., np.ndarray],
+    density_g: np.ndarray | None = None,
+    structure_survival: np.ndarray | None = None,
+    gold_population: np.ndarray | None = None,
+) -> np.ndarray:
+    """Cheap multi-scatter: density + gold-weighted amber cores × disk_weight.
+
+    Intensity uses soft ``density_g`` (primary) and soft ``gold_population_weight``
+    multiplicatively so the older core is brighter and gold-tinted. Sharp survival
+    is only a secondary soft cue.
+    """
+    s = float(np.clip(strength, 0.0, 0.55))
+    if s < 1e-6:
+        return canvas
+    h, w = int(opaque_core.shape[0]), int(opaque_core.shape[1])
+    if density_g is not None:
+        dens = np.clip(np.asarray(density_g, dtype=np.float64), 0.0, 1.0)
+        if dens.shape != (h, w):
+            dens = np.broadcast_to(dens, (h, w))
+        dens = blur_fn(dens, passes=5, periodic_x=periodic_x)
+    else:
+        dens = blur_fn(np.clip(np.asarray(opaque_core, dtype=np.float64), 0.0, 1.0), passes=5, periodic_x=periodic_x)
+    # Survival almost unused — density_G drives soft volumetric highlights, not hard islands.
+    if structure_survival is not None:
+        surv = np.clip(np.asarray(structure_survival, dtype=np.float64), 0.0, 1.35) / 1.35
+        if surv.shape != (h, w):
+            surv = np.broadcast_to(surv, (h, w))
+        surv_soft = blur_fn(surv, passes=7, periodic_x=periodic_x)
+        dens = np.clip(0.97 * dens + 0.03 * surv_soft, 0.0, 1.0)
+    opq = blur_fn(np.clip(np.asarray(opaque_core, dtype=np.float64), 0.0, 1.0), passes=3, periodic_x=periodic_x)
+    dens = np.clip(0.92 * dens + 0.08 * opq, 0.0, 1.0)
+
+    gold = np.zeros((h, w), dtype=np.float64)
+    if gold_population is not None:
+        gold = np.clip(np.asarray(gold_population, dtype=np.float64), 0.0, 1.0)
+        if gold.shape != (h, w):
+            gold = np.broadcast_to(gold, (h, w))
+        gold = blur_fn(gold, passes=4, periodic_x=periodic_x)
+        # Tint driver = soft density + gold (avoids streaky gold-only hotspots).
+        gold = np.clip(0.55 * dens + 0.45 * gold, 0.0, 1.0)
+        gold = gold / max(float(np.percentile(gold, 99.5)), 1e-6)
+        gold = np.clip(gold, 0.0, 1.0) ** 1.15  # compress peaks
+
+    dw = np.clip(np.asarray(disk_w, dtype=np.float64), 0.0, 1.0)
+    if dw.ndim == 1:
+        dw = dw[:, None]
+    if dw.shape != (h, w):
+        dw = np.broadcast_to(dw, (h, w))
+    # Tight disk + latitude falloff so gold dies on visual shoulders.
+    from starsky_gen.structure_envelope import midplane_gold_lat_gate
+
+    dw_tight = blur_fn(np.clip(dw, 0.0, 1.0), passes=2, periodic_x=periodic_x) ** 2.35
+    lat = midplane_gold_lat_gate(h, sigma=0.095, power=1.90)
+    if lat.shape != (h, w):
+        lat = np.broadcast_to(lat, (h, w))
+    gate = dens * dw_tight * lat * (0.28 + 0.72 * gold) * dens
+    if void_mask is not None:
+        void_w = np.clip(np.asarray(void_mask, dtype=np.float64), 0.0, 1.0)
+        if void_w.shape == gate.shape:
+            gate = gate * (1.0 - 0.82 * blur_fn(void_w, passes=2, periodic_x=periodic_x))
+    soft = blur_fn(gate, passes=4, periodic_x=periodic_x)
+    soft = soft / max(float(np.percentile(soft, 99.5)), 1e-6)
+    glow = np.clip(soft, 0.0, 1.0) ** 1.18
+    # Soft warm core — lower peak so it reads amber, not bright streaks.
+    tint = (
+        _GOLD_AMBER.reshape(1, 1, 3) * gold[..., np.newaxis] * 0.72
+        + _WARM_CORE.reshape(1, 1, 3) * (1.0 - gold[..., np.newaxis]) * 0.48
+    )
+    add = glow[..., np.newaxis] * tint * (0.028 * s)
+    return np.clip(np.asarray(canvas, dtype=np.float64) + add, 0.0, 1.0)
+
+
 def apply_galactic_band_color_grade(
     canvas: np.ndarray,
     disk_w: np.ndarray,
@@ -402,16 +567,22 @@ def apply_galactic_band_color_grade(
     void_mask: np.ndarray | None = None,
     latent_turb: np.ndarray | None = None,
     hii_hint: np.ndarray | None = None,
+    dust_lane_weight: np.ndarray | None = None,
+    puff_shell_weight: np.ndarray | None = None,
+    stellar_density: np.ndarray | None = None,
+    structure_survival: np.ndarray | None = None,
+    gold_population: np.ndarray | None = None,
     strength: float = 0.88,
-    inner_bias: float = 0.55,
-    anti_blue: float = 0.62,
-    void_turbulence: float = 0.55,
+    inner_bias: float = 0.72,
+    anti_blue: float = 0.38,
+    void_turbulence: float = 0.32,
     hii_strength: float = 0.06,
     dust_black_strength: float = 1.12,
     gas_fluff_strength: float = 0.78,
     micro_display_strength: float = 1.32,
     separation_strength: float = 0.0,
-    black_preserve_floor: float = 0.045,
+    multi_scatter_strength: float = 0.22,
+    black_preserve_floor: float = 0.028,
     gas_texture: np.ndarray | None = None,
     periodic_x: bool = True,
     blur_fn: Callable[..., np.ndarray] | None = None,
@@ -420,14 +591,31 @@ def apply_galactic_band_color_grade(
     """Re-map diffuse band color: warm gold/white ISM, brown/black lanes, sparse H II.
 
     Targets gas and continuum in the plane; resolved stars are mostly preserved via
-    a point-source mask. True blacks are not lifted — grade fades out below
-    ``black_preserve_floor`` luma.
+    a point-source mask. Soft black lift below ``black_preserve_floor`` is allowed for
+    cinematic skyboxes (voids stay cooler, plane warmer).
     """
     s = float(np.clip(strength, 0.0, 1.0))
     if s < 1e-6:
         return np.asarray(canvas, dtype=np.float64)
     lin = np.maximum(np.asarray(canvas, dtype=np.float64), 0.0)
     h, w = int(lin.shape[0]), int(lin.shape[1])
+    dw_pre = np.clip(np.asarray(disk_w, dtype=np.float64), 0.0, 1.0)
+    if dw_pre.ndim == 1:
+        dw_pre = dw_pre[:, None]
+    if dw_pre.shape != (h, w):
+        dw_pre = np.broadcast_to(dw_pre, (h, w))
+    plane_pre = np.clip(dw_pre**1.05, 0.0, 1.0)
+    exc_b = np.clip(
+        lin[..., 2] - np.maximum(lin[..., 0], lin[..., 1]) * 0.94,
+        0.0,
+        None,
+    )
+    if float(np.max(exc_b)) > 1e-6:
+        sh = plane_pre * 0.38
+        lin = lin.copy()
+        lin[..., 2] = np.maximum(0.0, lin[..., 2] - exc_b * sh)
+        lin[..., 0] = lin[..., 0] + exc_b * sh * 0.34
+        lin[..., 1] = lin[..., 1] + exc_b * sh * 0.20
     dw = np.clip(np.asarray(disk_w, dtype=np.float64), 0.0, 1.0)
     if dw.ndim == 1:
         dw = dw[:, None]
@@ -446,14 +634,19 @@ def apply_galactic_band_color_grade(
     lu_blur = np.clip(blur_fn(lu, passes=2, periodic_x=periodic_x), 0.0, None)
     hf = np.clip(lu - lu_blur, 0.0, None)
     pointness = np.clip(hf / np.maximum(lu, 1e-6), 0.0, 1.0) ** 0.88
-    bright_keep = np.clip((lu - 0.36) / 0.22, 0.0, 1.0) * np.clip(pointness / 0.18, 0.0, 1.0)
+    bright_keep = np.clip((lu - 0.26) / 0.16, 0.0, 1.0) * np.clip(pointness / 0.10, 0.0, 1.0)
     plane = np.clip(dw**1.05, 0.0, 1.0)
 
     bf = float(np.clip(black_preserve_floor, 0.02, 0.14))
     luma_gate = np.clip((lu - bf) / max(0.12 - bf, 0.04), 0.0, 1.0) ** 1.35
+    star_protect = np.clip(pointness / 0.08, 0.0, 1.0) ** 1.35
     diffuse_w = (
         np.clip(
-            plane * luma_gate * (1.0 - pointness * 0.90) * (1.0 - bright_keep * 0.92),
+            plane
+            * luma_gate
+            * (1.0 - pointness * 0.98)
+            * (1.0 - bright_keep * 0.98)
+            * (1.0 - star_protect * 0.92),
             0.0,
             1.0,
         )
@@ -461,7 +654,7 @@ def apply_galactic_band_color_grade(
     )
 
     rel_clear = band_relative_clearance(ext, dw, min_clear=0.14, power=0.90)
-    lane_dark = np.clip(1.0 - rel_clear, 0.0, 1.0) ** 1.05
+    lane_dark = np.clip(1.0 - rel_clear, 0.0, 1.0) ** 1.14
 
     xx = np.linspace(-1.0, 1.0, w, dtype=np.float64)[None, :]
 
@@ -513,42 +706,142 @@ def apply_galactic_band_color_grade(
         xx=xx,
     )
 
-    w_warm = rel_clear * (1.0 - sf * 0.68) * plane * (0.72 + 0.28 * struct_w)
+    lane_arch = (
+        np.clip(np.asarray(dust_lane_weight, dtype=np.float64), 0.0, 1.0)
+        if dust_lane_weight is not None
+        else lane_dark
+    )
+    if lane_arch.shape != (h, w):
+        lane_arch = np.broadcast_to(lane_arch, (h, w))
+    shell_arch = (
+        np.clip(np.asarray(puff_shell_weight, dtype=np.float64), 0.0, 1.0)
+        if puff_shell_weight is not None
+        else np.clip(plane * (1.0 - lane_dark), 0.0, 1.0)
+    )
+    if shell_arch.shape != (h, w):
+        shell_arch = np.broadcast_to(shell_arch, (h, w))
 
+    w_warm = (
+        (rel_clear**0.55 + 0.34 * plane)
+        * (1.0 - sf * 0.45)
+        * plane
+        * (0.58 + 0.28 * struct_w + 0.22 * shell_arch)
+    )
+    dens_soft = plane
+    if stellar_density is not None:
+        dens_soft = np.clip(np.asarray(stellar_density, dtype=np.float64), 0.0, 1.0)
+        if dens_soft.shape != (h, w):
+            dens_soft = np.broadcast_to(dens_soft, (h, w))
+        # Soft volumetric driver — avoid hard survival-like islands in grade.
+        dens_soft = blur_fn(dens_soft, passes=5, periodic_x=periodic_x)
+
+    gold_w = np.zeros((h, w), dtype=np.float64)
+    if gold_population is not None:
+        gold_w = np.clip(np.asarray(gold_population, dtype=np.float64), 0.0, 1.0)
+        if gold_w.shape != (h, w):
+            gold_w = np.broadcast_to(gold_w, (h, w))
+        gold_w = blur_fn(gold_w, passes=4, periodic_x=periodic_x)
+        gold_w = np.clip(0.55 * dens_soft + 0.45 * gold_w, 0.0, 1.0)
+        gold_w = gold_w / max(float(np.percentile(gold_w, 99.5)), 1e-6)
+        gold_w = np.clip(gold_w, 0.0, 1.0) ** 1.18
+    # Razor disk + latitude gate — shoulder latitudes must stay cool/red, not gold.
+    from starsky_gen.structure_envelope import midplane_gold_lat_gate
+
+    lat = midplane_gold_lat_gate(h, sigma=0.095, power=1.90)
+    if lat.shape != (h, w):
+        lat = np.broadcast_to(lat, (h, w))
+    gold_w = gold_w * np.clip(plane**3.05, 0.0, 1.0) * lat
+
+    # Soft amber spine; modest extra weight in central ~35% of tightened gold_w.
+    nz_g = gold_w > 1e-5
+    gold_core = np.zeros_like(gold_w)
+    if bool(np.any(nz_g)):
+        thr_g = float(np.percentile(gold_w[nz_g], 65.0))
+        gold_core = np.clip((gold_w - thr_g) / max(1.0 - thr_g, 0.08), 0.0, 1.0)
+    w_core = np.clip(
+        lane_arch
+        * (0.30 + 0.70 * dens_soft)
+        * (0.35 + 0.65 * dust)
+        * (0.25 + 0.85 * gold_w)
+        * (1.0 + 0.18 * gold_core),
+        0.0,
+        1.0,
+    ) * 0.38
+    w_cool = np.clip(shell_arch * rel_clear**0.42 * (1.0 - lane_arch * 0.55), 0.0, 1.0) * 0.55
+
+    # Light contrast + soft blur for intentional red/orange nebula clumps.
     w_hii = np.zeros((h, w), dtype=np.float64)
+    red_src = np.clip(gas_struct * dens_soft * (0.45 + 0.55 * dust) * plane, 0.0, 1.0)
     if hii_hint is not None:
         hh = np.clip(np.asarray(hii_hint, dtype=np.float64), 0.0, 1.0)
         if hh.ndim == 3:
             hh = rec709_luma(hh)
         if hh.shape != (h, w):
             hh = np.broadcast_to(hh, (h, w))
-        w_hii = _sparse_peak_mask(hh, plane, percentile=99.2, power=3.4)
-    w_hii = w_hii * float(np.clip(hii_strength, 0.0, 0.35))
+        red_src = np.clip(np.maximum(red_src, hh * plane), 0.0, 1.0)
+    if structure_survival is not None:
+        surv = np.clip(np.asarray(structure_survival, dtype=np.float64), 0.0, 1.35) / 1.35
+        if surv.shape == (h, w):
+            red_src = red_src * (0.45 + 0.55 * blur_fn(surv, passes=5, periodic_x=periodic_x))
+    red_src = red_src * (1.0 - 0.55 * gold_w)  # allow more red next to warm core
+    gate = red_src > 1e-5
+    if bool(np.any(gate)):
+        thr = float(np.percentile(red_src[gate], 70.0))
+        clumped = np.clip((red_src - thr) / max(1.0 - thr, 0.08), 0.0, 1.0) ** 1.50
+        clumped = blur_fn(clumped, passes=4, periodic_x=periodic_x)
+        w_hii = clumped * dens_soft * float(np.clip(hii_strength, 0.0, 0.55)) * 1.55
 
-    w_dust = np.clip(gas_struct * (0.55 + 0.45 * dust) * struct_w * (0.35 + 0.65 * void_w), 0.0, 1.0)
-    w_void = lane_dark * void_w * turb * struct_w * (0.38 + 0.62 * lane_dark)
+    w_dust = (
+        np.clip(gas_struct * (0.55 + 0.45 * dust) * struct_w * (0.35 + 0.65 * void_w), 0.0, 1.0)
+        * 0.52
+    )
+    # Stronger void windows through the plane.
+    w_void = lane_dark * void_w * turb * struct_w * (0.48 + 0.72 * lane_dark) * 0.78
 
-    w_sum = w_warm + w_hii + w_dust + w_void + 1e-6
+    lane_d = np.clip(lane_dark, 0.0, 1.0)
+    dust_rgb = (0.42 * _DUST_BROWN + 0.58 * _DUST_BLACK) * (1.0 - lane_d[..., np.newaxis]) + (
+        0.58 * _DUST_BROWN + 0.42 * _DUST_BLACK
+    ) * lane_d[..., np.newaxis]
+    # Richer red-orange around dense dust; gold amber in core.
+    hii_rgb = (
+        _HII_RED.reshape(1, 1, 3) * (0.55 + 0.45 * (1.0 - gold_w[..., np.newaxis]))
+        + _HII_ORANGE.reshape(1, 1, 3) * (0.35 * (1.0 - gold_w[..., np.newaxis]))
+    )
+    core_rgb = (
+        _GOLD_AMBER.reshape(1, 1, 3) * gold_w[..., np.newaxis]
+        + _WARM_CORE.reshape(1, 1, 3) * (1.0 - gold_w[..., np.newaxis]) * 0.65
+    )
+
+    w_sum = w_warm + w_core + w_cool + w_hii + w_dust + w_void + 1e-6
+    # Prefer soft warm over saturated amber (amber HF reads as gold streak islands).
+    gold_mix = 0.24 * _GOLD_OLD + 0.34 * _GOLD_WHITE + 0.42 * _GOLD_AMBER
     tr = (
-        w_warm[..., np.newaxis] * (0.58 * _GOLD_OLD + 0.42 * _GOLD_WHITE)
-        + w_hii[..., np.newaxis] * _HII_RED
-        + w_dust[..., np.newaxis] * (0.42 * _DUST_BROWN + 0.58 * _DUST_BLACK)
+        w_warm[..., np.newaxis] * gold_mix
+        + w_core[..., np.newaxis] * core_rgb
+        + w_cool[..., np.newaxis] * _COOL_SHELL
+        + w_hii[..., np.newaxis] * hii_rgb
+        + w_dust[..., np.newaxis] * dust_rgb
         + w_void[..., np.newaxis] * _DUST_BLACK
     ) / w_sum[..., np.newaxis]
 
     in_ratio = lin / np.maximum(lu[..., np.newaxis], 1e-6)
-    blend = diffuse_w[..., np.newaxis]
+    blue_excess = np.clip(lin[..., 2] / np.maximum(lin[..., 0], 1e-6) - 1.05, 0.0, 0.55)
+    blend = diffuse_w[..., np.newaxis] * (
+        0.62
+        + 0.38 * np.clip(lu / 0.40, 0.0, 1.0)[..., np.newaxis]
+        + 0.14 * blue_excess[..., np.newaxis]
+    )
     graded_ratio = in_ratio * (1.0 - blend) + tr * blend
     out = np.maximum(graded_ratio * lu[..., np.newaxis], 0.0)
 
     dust_mix = np.clip((w_dust + w_void) / w_sum, 0.0, 1.0) * diffuse_w
     if float(np.max(dust_mix)) > 1e-6:
-        dark_lu = np.minimum(lu, lu * (1.0 - dust_mix * (0.58 + 0.42 * struct_w)))
+        dark_lu = np.minimum(lu, lu * (1.0 - dust_mix * (0.34 + 0.24 * struct_w)))
         out = remap_luma_preserving_chroma(out, dark_lu)
 
     ab = float(np.clip(anti_blue, 0.0, 1.0))
     if ab > 1e-6:
-        tone_gate = diffuse_w * luma_gate
+        tone_gate = diffuse_w * luma_gate * (1.0 - np.clip(lane_dark * 0.88 + void_w * 0.28, 0.0, 1.0))
         cool = np.clip(
             out[..., 2] - (out[..., 0] * 0.48 + out[..., 1] * 0.44),
             0.0,
@@ -563,8 +856,9 @@ def apply_galactic_band_color_grade(
             0.0,
             None,
         )
-        out[..., 0] = out[..., 0] + warm_lift * ab * tone_gate * 0.12
-        out[..., 1] = out[..., 1] + warm_lift * ab * tone_gate * 0.08
+        out[..., 0] = out[..., 0] + warm_lift * ab * tone_gate * 0.06
+        out[..., 1] = out[..., 1] + warm_lift * ab * tone_gate * 0.05
+        out[..., 2] = np.maximum(0.0, out[..., 2] - warm_lift * ab * tone_gate * 0.04)
 
     vt = float(np.clip(void_turbulence, 0.0, 1.0))
     if vt > 1e-6 and rng is not None:
@@ -576,9 +870,9 @@ def apply_galactic_band_color_grade(
             noise = rng.random((h, w), dtype=np.float64)
             noise = blur_fn(noise, passes=1, periodic_x=periodic_x)
             noise = np.clip(noise * 1.4 - 0.35, 0.0, 1.0)
-            crush_w = void_gate * vt * (0.35 + 0.50 * noise)
-            crush_lu = np.minimum(lu_mid, lu_mid * (1.0 - crush_w * 0.92))
-            crush_lu = np.minimum(crush_lu, 0.008 + lu_mid * (1.0 - crush_w) * 0.04)
+            crush_w = void_gate * vt * (0.10 + 0.22 * noise)
+            crush_lu = np.minimum(lu_mid, lu_mid * (1.0 - crush_w * 0.38))
+            crush_lu = np.minimum(crush_lu, 0.02 + lu_mid * (1.0 - crush_w) * 0.12)
             black_rgb = _DUST_BLACK.reshape(1, 1, 3) * crush_lu[..., np.newaxis]
             mix = crush_w[..., np.newaxis]
             out = out * (1.0 - mix) + black_rgb * mix
@@ -640,5 +934,73 @@ def apply_galactic_band_color_grade(
             strength=sep_s,
             periodic_x=periodic_x,
         )
+
+    # Aggressive void carve: dark windows through the plane (soft, not binary).
+    # Keep resolved bright points out of the carve so stars stay crisp.
+    void_carve = np.clip(void_w * (0.55 + 0.45 * lane_dark) * plane, 0.0, 1.0)
+    void_carve = blur_fn(void_carve, passes=2, periodic_x=periodic_x)
+    void_carve = void_carve * (1.0 - star_protect) * (1.0 - bright_keep)
+    out = np.maximum(out * (1.0 - 0.42 * void_carve[..., np.newaxis]), 0.0)
+
+    # Midplane multi-scatter: density + gold_population × disk_weight (amber core).
+    opaque_core = np.clip((1.0 - ext) * (0.45 + 0.55 * lane_arch) * (0.30 + 0.70 * turb), 0.0, 1.0)
+    out = apply_core_multi_scatter_glow(
+        out,
+        opaque_core=opaque_core,
+        disk_w=dw,
+        void_mask=void_w,
+        strength=float(multi_scatter_strength) * s,
+        periodic_x=periodic_x,
+        blur_fn=blur_fn,
+        density_g=stellar_density,
+        structure_survival=structure_survival,
+        gold_population=gold_population,
+    )
+
+    # Outside gold core, pull back red saturation so the center reads distinctly gold.
+    # Diffuse-only: never desaturate resolved bright points.
+    red_ex = np.clip(out[..., 0] - np.maximum(out[..., 1], out[..., 2]) * 1.02, 0.0, None)
+    desat = diffuse_w * (1.0 - gold_w) * 0.38 * (1.0 - star_protect) * (1.0 - bright_keep)
+    out[..., 0] = np.maximum(0.0, out[..., 0] - red_ex * desat)
+    out[..., 1] = out[..., 1] + red_ex * desat * 0.22
+    out[..., 2] = out[..., 2] + red_ex * desat * 0.08
+
+    # Kill jagged HF gold chroma islands: keep soft warm core, strip streak excess.
+    # Also catch shoulder/lane flecks (near-zero stars) that survive as thin horizontal dashes.
+    gold_ex = np.clip(
+        out[..., 0] - np.maximum(out[..., 1], out[..., 2]) * 1.05,
+        0.0,
+        None,
+    )
+    gold_soft = blur_fn(gold_ex, passes=4, periodic_x=periodic_x)
+    gold_hf = np.clip(gold_ex - gold_soft * 0.85, 0.0, None)
+    lu_now = rec709_luma(out)
+    lu_body = np.clip((lu_now - 0.08) / 0.22, 0.0, 1.0)
+    hf_gate = (
+        (0.35 + 0.65 * diffuse_w)
+        * (1.0 - star_protect)
+        * (1.0 - bright_keep)
+        * np.clip(plane**0.65, 0.0, 1.0)
+        * lu_body
+    )
+    kill = gold_hf * hf_gate * (0.92 * s)
+    out[..., 0] = np.maximum(0.0, out[..., 0] - kill)
+    out[..., 1] = out[..., 1] + kill * 0.40
+    # Replace remaining gold excess with soft midplane warmth (no HF dashes).
+    gold_ex2 = np.clip(
+        out[..., 0] - np.maximum(out[..., 1], out[..., 2]) * 1.05,
+        0.0,
+        None,
+    )
+    replace = np.clip(gold_ex2 - gold_soft, 0.0, None) * hf_gate * 0.70 * s
+    out[..., 0] = np.maximum(0.0, out[..., 0] - replace)
+    out[..., 1] = out[..., 1] + replace * 0.55
+    out[..., 2] = out[..., 2] + replace * 0.18
+
+    # Subtle black lift off-plane only — keep cinematic voids dark (not grey haze).
+    lu_out = rec709_luma(out)
+    lift = np.clip((0.010 - lu_out) / 0.010, 0.0, 1.0) * (1.0 - plane * 0.78)
+    cool_void = np.array([0.006, 0.007, 0.011], dtype=np.float64).reshape(1, 1, 3)
+    out = out + lift[..., np.newaxis] * cool_void
 
     return np.clip(out, 0.0, 1.0).astype(np.float64)

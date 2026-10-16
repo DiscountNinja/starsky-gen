@@ -34,6 +34,35 @@ class MorphologyIsmLayers:
     luma: np.ndarray
 
 
+@dataclass
+class StructureArchitectureWeights:
+    """Explicit weight maps that plan where turbulent cloud architecture is driven.
+
+    Used by galactic morphology, extinction coupling, and (later) full-frame nebula so
+    puff / vertical extent / reinject share one host instead of rim-only heuristics.
+
+    Channels:
+      band_host — permissive ISM host (wider than razor disk_weight).
+      turbulence_drive — master mix weight [floor..1] through the band core and plumes.
+      puff_weight / vertical_weight / reinject_weight — per-mechanism drive (× turbulence_drive).
+      dust_lane_weight — tight mid-plane dust sub-band (Milky-Way dark lane inside the band).
+      puff_shell_weight — fluffy shell above/below the dust lane (more puff, not the lane core).
+      negative_space_weight — clear pockets in the shell (sightline gaps between clouds).
+      survival_weight / turb_latent_weight — auxiliary coupling for nebula/ISM passes.
+    """
+
+    band_host: np.ndarray
+    turbulence_drive: np.ndarray
+    puff_weight: np.ndarray
+    vertical_weight: np.ndarray
+    reinject_weight: np.ndarray
+    dust_lane_weight: np.ndarray
+    puff_shell_weight: np.ndarray
+    negative_space_weight: np.ndarray
+    survival_weight: np.ndarray
+    turb_latent_weight: np.ndarray
+
+
 def soften_band_envelope(
     disk_weight: np.ndarray | None,
     shape: tuple[int, int],
@@ -68,6 +97,19 @@ def latitude_plane_gate(
     pw = float(np.clip(power, 0.5, 2.5))
     yy = np.linspace(-1.0, 1.0, int(height), dtype=np.float64)[:, None]
     return np.clip(np.exp(-((yy**2) / sig)) ** pw, 0.0, 1.0).astype(np.float64)
+
+
+def midplane_gold_lat_gate(
+    height: int,
+    *,
+    sigma: float = 0.095,
+    power: float = 1.85,
+) -> np.ndarray:
+    """Narrow latitude razor for gold — disk_weight alone is too thick on shoulders."""
+    sig = float(np.clip(sigma, 0.05, 0.22))
+    pw = float(np.clip(power, 1.0, 3.0))
+    yy = np.linspace(-1.0, 1.0, int(height), dtype=np.float64)[:, None]
+    return np.clip(np.exp(-((yy / sig) ** 2)) ** pw, 0.0, 1.0).astype(np.float64)
 
 
 def wisp_vertical_bleed_gate(
@@ -122,28 +164,75 @@ def sample_band_lat_curve(
     *,
     band_curvature_amp: float = 0.04,
 ) -> tuple[np.ndarray, str]:
-    """Per-longitude lat center warp: S, U, W, or mild flat (seed-locked, exaggerated)."""
+    """Per-longitude lat center warp: S, U, W, or mild flat (subtle midplane bend)."""
     w = int(width)
     xx = np.linspace(0.0, 1.0, w, dtype=np.float64, endpoint=False)
     phase = float(rng.uniform(0.0, 2.0 * np.pi))
-    amp = float(np.clip(band_curvature_amp + rng.uniform(0.0, 0.048), 0.022, 0.20))
+    amp = float(np.clip(band_curvature_amp * 0.72 + rng.uniform(0.0, 0.018), 0.010, 0.065))
     roll = float(rng.uniform())
     freq = 2.0 * np.pi
     if roll < 0.44:
-        curve = amp * 1.55 * np.sin(freq * xx + phase)
+        curve = amp * 1.05 * np.sin(freq * xx + phase)
         kind = "s"
     elif roll < 0.72:
-        curve = amp * 1.85 * (np.sin(freq * xx + phase) ** 2 - 0.5)
+        curve = amp * 1.18 * (np.sin(freq * xx + phase) ** 2 - 0.5)
         kind = "u"
     elif roll < 0.90:
         curve = amp * (
-            0.72 * np.sin(freq * xx + phase) + 0.52 * np.sin(2.0 * freq * xx + phase * 1.17)
+            0.68 * np.sin(freq * xx + phase) + 0.38 * np.sin(2.0 * freq * xx + phase * 1.17)
         )
         kind = "w"
     else:
-        curve = amp * 0.62 * np.sin(freq * xx + phase)
+        curve = amp * 0.48 * np.sin(freq * xx + phase)
         kind = "flat"
     return curve.reshape(1, -1).astype(np.float64), kind
+
+
+def clamp_disk_band_thickness(
+    disk_weight: np.ndarray,
+    *,
+    min_half_width_frac: float = 0.050,
+    max_half_width_frac: float = 0.118,
+    level_frac: float = 0.30,
+    periodic_x: bool = True,
+) -> np.ndarray:
+    """Keep band latitudinal half-width between min/max fractions of frame height."""
+    _ = periodic_x
+    from starsky_gen.dust_field import _blur_y_only_field
+
+    dw = np.clip(np.asarray(disk_weight, dtype=np.float64), 0.0, 1.0)
+    h, w = int(dw.shape[0]), int(dw.shape[1])
+    min_hw = float(np.clip(min_half_width_frac, 0.032, 0.10)) * h
+    max_hw = float(np.clip(max_half_width_frac, min_hw / h + 0.025, 0.20)) * h
+    lvl = float(np.clip(level_frac, 0.22, 0.45))
+    out = dw.copy()
+    yy = np.arange(h, dtype=np.float64)[:, None]
+    for j in range(w):
+        p = dw[:, j]
+        mx = float(np.max(p))
+        if mx < 0.07:
+            continue
+        mask = p >= mx * lvl
+        if not bool(np.any(mask)):
+            continue
+        rows = np.flatnonzero(mask)
+        cy = float(np.mean(rows))
+        hw = max(float(rows[-1] - rows[0]) * 0.5, 1.0)
+        prof = p.copy()
+        if hw < min_hw:
+            sig = float(np.clip((min_hw - hw) * 0.28, 2.0, 18.0))
+            expanded = _blur_y_only_field(prof.reshape(-1, 1), sig).ravel()
+            ex_mx = float(np.max(expanded))
+            if ex_mx > 1e-8:
+                expanded = expanded * (mx / ex_mx)
+            prof = np.clip(np.maximum(prof, expanded), 0.0, mx)
+        elif hw > max_hw:
+            yy_c = yy - cy
+            compress = np.exp(-((yy_c / max(max_hw, 2.0)) ** 2))
+            prof = prof * compress
+            prof = prof / (float(np.max(prof)) + 1e-8) * mx
+        out[:, j] = prof
+    return np.clip(out * 0.90 + dw * 0.10, 0.0, 1.0).astype(np.float64)
 
 
 def apply_disk_weight_pole_falloff(
@@ -246,6 +335,42 @@ def build_disk_mesoscale_thickness_field(
     return meso.astype(np.float64), lat_shear.astype(np.float64)
 
 
+def modulate_disk_weight_longitude(
+    disk_weight: np.ndarray,
+    lon_asymmetry: np.ndarray,
+    rng: np.random.Generator,
+    *,
+    periodic_x: bool = True,
+    strength: float = 1.0,
+) -> np.ndarray:
+    """Longitude-varying disk envelope: brighter/thicker on disaster side, quieter opposite."""
+    s = float(np.clip(strength, 0.0, 1.35))
+    if s < 1e-6:
+        return np.clip(disk_weight, 0.0, 1.0).astype(np.float64)
+    dw = np.clip(np.asarray(disk_weight, dtype=np.float64), 0.0, 1.0)
+    h, w = dw.shape
+    lon = np.clip(np.asarray(lon_asymmetry, dtype=np.float64), 0.42, 1.62)
+    if lon.ndim == 1:
+        lon = np.broadcast_to(lon.reshape(1, -1), (h, w))
+    elif lon.shape != (h, w):
+        lon = _resize_bilinear(lon, h, w, periodic_x=periodic_x)
+    from starsky_gen.dust_field import _blur_x_only_field
+
+    lon = _blur_x_only_field(lon, 2.8, periodic_x=periodic_x)
+    ch, cw = max(6, h // 40), max(12, w // 24)
+    tilt = fbm2d(rng, ch, cw, base_scale=0.11, octaves=3, periodic_x=periodic_x)
+    tilt = _resize_bilinear(tilt, 1, w, periodic_x=periodic_x)[0:1, :]
+    tilt = _blur_x_only_field(tilt, 5.0, periodic_x=periodic_x)
+    tilt = np.clip((tilt - 0.48) * 1.35, -0.35, 0.35)
+    yy = np.linspace(-1.0, 1.0, h, dtype=np.float64)[:, None]
+    lat_bias = 1.0 + tilt * yy * 0.22 * s
+    out = np.clip(dw * (0.58 + 0.42 * lon) * lat_bias, 0.0, 1.0)
+    mx = float(np.max(out))
+    if mx > 1e-8:
+        out = out / mx
+    return out.astype(np.float64)
+
+
 def apply_variable_band_thickness(
     disk_weight: np.ndarray,
     rng: np.random.Generator,
@@ -275,9 +400,13 @@ def apply_variable_band_thickness(
     rng_b = np.random.default_rng(int(rng.integers(0, 2**31)) ^ 0xB07A)
     lon_bot = fbm2d(rng_b, ch, cw, base_scale=0.14, octaves=4, periodic_x=periodic_x)
     lon_bot = _resize_bilinear(lon_bot, 1, w, periodic_x=periodic_x)[0:1, :]
+    from starsky_gen.dust_field import _blur_x_only_field
+
+    lon_top = _blur_x_only_field(lon_top, 4.2, periodic_x=periodic_x)
+    lon_bot = _blur_x_only_field(lon_bot, 4.2, periodic_x=periodic_x)
     sig_base = float(np.clip(band_lat_sigma, 0.04, 0.22)) * 1.28
-    thick_top = 0.28 + j * (np.clip(lon_top, 0.0, 1.0) ** 1.65)
-    thick_bot = 0.42 + j * (np.clip(lon_bot, 0.0, 1.0) ** 1.65)
+    thick_top = 0.30 + j * (np.clip(lon_top, 0.0, 1.0) ** 1.45) * 0.85
+    thick_bot = 0.38 + j * (np.clip(lon_bot, 0.0, 1.0) ** 1.45) * 0.92
     asym = float(np.clip(thickness_asymmetry, 0.0, 0.72))
     if asym > 1e-6:
         thin_side = 1.0 if float(rng.uniform()) < 0.5 else -1.0
@@ -289,11 +418,13 @@ def apply_variable_band_thickness(
     sig_top = np.maximum(sig_top, sig_bot * 0.50)
     lon_warp = fbm2d(rng, ch, cw, base_scale=0.09, octaves=3, periodic_x=periodic_x)
     lon_warp = _resize_bilinear(lon_warp, 1, w, periodic_x=periodic_x)[0:1, :]
-    lon_scale = 0.68 + 0.52 * np.clip(lon_warp, 0.0, 1.0) ** 1.4
+    lon_warp = _blur_x_only_field(lon_warp, 3.0, periodic_x=periodic_x)
+    lon_scale = 0.82 + 0.28 * np.clip(lon_warp, 0.0, 1.0) ** 1.35
     sig_top = sig_top * lon_scale
     sig_bot = sig_bot * lon_scale
     sig_y = np.where(yy_eff >= 0.0, sig_top, sig_bot)
-    thick_mod = np.clip(1.0 + meso, 0.36, 1.92)
+    sig_y = np.clip(sig_y, sig_base * 0.62, sig_base * 1.22)
+    thick_mod = np.clip(1.0 + meso * 0.82, 0.48, 1.55)
     sig_y = sig_y * thick_mod
     band = np.exp(-((yy_eff / np.maximum(sig_y, 0.018)) ** 2))
     row_envelope = np.max(dw, axis=1, keepdims=True)
@@ -307,11 +438,283 @@ def apply_variable_band_thickness(
     out = np.clip(out * (0.48 + 0.52 * dw / norm), 0.0, 1.0)
     out = soften_disk_weight_band_rim(out, periodic_x=periodic_x, strength=0.40)
     out = apply_disk_weight_pole_falloff(out, h, sigma=0.38, power=1.22)
+    out = clamp_disk_band_thickness(out, periodic_x=periodic_x)
     return (
         (out / (float(np.max(out)) + 1e-8)).astype(np.float64),
         _curve_kind,
         meso.astype(np.float64),
     )
+
+
+def build_band_lane_shell_profiles(
+    disk_weight: np.ndarray,
+    *,
+    periodic_x: bool = True,
+    lane_tightness: float = 0.36,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Split the band into a tight inner dust lane and a puffier shell (sandwich profile).
+
+    Returns ``(dust_lane, puff_shell, band_soft)`` — lane peaks on the warped mid-plane.
+    """
+    lt = float(np.clip(lane_tightness, 0.18, 0.55))
+    dw = np.clip(np.asarray(disk_weight, dtype=np.float64), 0.0, 1.0)
+    h, w = dw.shape
+    soft = soften_band_envelope(dw, (h, w), periodic_x=periodic_x, lat_blur_sigma=14.0, power=0.50)
+    yy = np.linspace(-1.0, 1.0, h, dtype=np.float64)[:, None]
+    row_peak = np.max(soft, axis=1, keepdims=True)
+    lane_sig = np.clip(row_peak * lt + 0.032, 0.028, 0.12)
+    lane = np.exp(-((yy**2) / (2.0 * lane_sig**2))) * soft
+    lane = np.clip(lane**1.08, 0.0, 1.0)
+    shell = np.clip(soft - lane * 0.78, 0.0, 1.0) ** 0.88
+    return (
+        lane.astype(np.float64),
+        shell.astype(np.float64),
+        soft.astype(np.float64),
+    )
+
+
+def _softmax_compete_channels(
+    channels: list[np.ndarray],
+    *,
+    competition: float,
+) -> list[np.ndarray]:
+    """Sharpen competing architecture channels (0=unchanged, 1=near argmax)."""
+    c = float(np.clip(competition, 0.0, 1.0))
+    if c < 1e-6 or not channels:
+        return channels
+    # Temperature: high temp ≈ blend, low ≈ winner-take-most.
+    temp = float(np.clip(1.35 - 1.15 * c, 0.18, 1.35))
+    stack = np.stack([np.clip(np.asarray(ch, dtype=np.float64), 0.0, 1.0) for ch in channels], axis=0)
+    # Stabilize: shift by max, then softmax.
+    m = np.max(stack, axis=0, keepdims=True)
+    ex = np.exp((stack - m) / temp)
+    soft = ex / (np.sum(ex, axis=0, keepdims=True) + 1e-8)
+    # Preserve total mass of each pixel's channel sum so morph energy stays similar.
+    mass = np.sum(stack, axis=0, keepdims=True) + 1e-8
+    out = soft * mass
+    # Blend back toward originals so mid competition isn't too harsh.
+    blend = c
+    return [((1.0 - blend) * stack[i] + blend * out[i]).astype(np.float64) for i in range(stack.shape[0])]
+
+
+def build_structure_architecture_weights(
+    disk_weight: np.ndarray,
+    vertical_extent: np.ndarray,
+    structure_survival: np.ndarray,
+    puff_field: np.ndarray,
+    latent_turb: np.ndarray,
+    *,
+    lon_asymmetry: np.ndarray | None = None,
+    erosion: np.ndarray | None = None,
+    fractal_dark: np.ndarray | None = None,
+    band_core_drive: float = 0.52,
+    inner_dust_lane_strength: float = 0.72,
+    strength: float = 1.0,
+    type_competition: float = 0.0,
+    plane_warp_amp: float = 0.07,
+    periodic_x: bool = True,
+) -> StructureArchitectureWeights:
+    """Plan turbulent architecture weights across the full galactic band (not only rims)."""
+    st = float(np.clip(strength, 0.0, 1.35))
+    core = float(np.clip(band_core_drive, 0.22, 0.82))
+    dw = np.clip(np.asarray(disk_weight, dtype=np.float64), 0.0, 1.0)
+    h, w = dw.shape
+    ve = np.clip(np.asarray(vertical_extent, dtype=np.float64), 0.0, 1.0)
+    if ve.shape != (h, w):
+        ve = _resize_bilinear(ve, h, w, periodic_x=periodic_x)
+    surv = np.clip(np.asarray(structure_survival, dtype=np.float64) / 1.35, 0.0, 1.0)
+    pf = np.clip(np.asarray(puff_field, dtype=np.float64), 0.0, 1.0)
+    if pf.shape != (h, w):
+        pf = _resize_bilinear(pf, h, w, periodic_x=periodic_x)
+    turb = np.clip(np.asarray(latent_turb, dtype=np.float64), 0.0, 1.0)
+    if turb.shape != (h, w):
+        turb = _resize_bilinear(turb, h, w, periodic_x=periodic_x)
+
+    # Low-frequency latitude bend so the plane is not a perfectly flat equator.
+    warp_a = float(np.clip(plane_warp_amp, 0.0, 0.18))
+    if warp_a > 1e-6:
+        dw = apply_low_frequency_band_warp(dw, amplitude=warp_a, periodic_x=periodic_x)
+        dw = np.clip(dw / max(float(np.max(dw)), 1e-6), 0.0, 1.0)
+        ve = apply_low_frequency_band_warp(ve, amplitude=warp_a * 0.85, periodic_x=periodic_x)
+        ve = np.clip(ve, 0.0, 1.0)
+        pf = apply_low_frequency_band_warp(pf, amplitude=warp_a * 0.70, periodic_x=periodic_x)
+        pf = np.clip(pf, 0.0, 1.0)
+
+    lane, shell, soft = build_band_lane_shell_profiles(
+        dw, periodic_x=periodic_x, lane_tightness=0.30
+    )
+    lane_s = float(np.clip(inner_dust_lane_strength, 0.0, 1.25))
+    if erosion is not None:
+        er = np.clip(np.asarray(erosion, dtype=np.float64), 0.0, 1.0)
+        if er.shape != (h, w):
+            er = _resize_bilinear(er, h, w, periodic_x=periodic_x)
+        fd = (
+            np.clip(np.asarray(fractal_dark, dtype=np.float64), 0.0, 1.0)
+            if fractal_dark is not None
+            else er
+        )
+        if fd.shape != (h, w):
+            fd = _resize_bilinear(fd, h, w, periodic_x=periodic_x)
+        dark_tex = np.clip(er * 0.52 + fd * 0.38, 0.0, 1.0)
+    else:
+        dark_tex = lane * 0.5
+    dust_lane = np.clip(lane * (0.42 + 0.58 * dark_tex) * lane_s, 0.0, 1.0)
+    negative_space = np.clip(shell * (1.0 - dark_tex * 0.68) ** 1.02, 0.0, 1.0)
+    scale = float(max(h, w))
+    sig = float(np.clip(scale * 0.009, 0.8, 9.0))
+    turb_hp = np.clip(turb - gaussian_blur_pil(turb, sig, periodic_x=periodic_x) * 0.74, 0.0, 1.0)
+
+    band_host = np.clip(
+        0.18 + 0.72 * np.maximum(soft, ve * 0.68) + pf**0.92 * 0.38,
+        0.0,
+        1.42,
+    )
+    core_drive = np.clip(soft**0.52 * (core + (1.0 - core) * ve * 0.72), 0.0, 1.0)
+    plume_drive = np.clip(ve * (0.40 + 0.60 * soft), 0.0, 1.0)
+    puff_drive = np.clip(pf**0.86 * (0.34 + 0.66 * soft), 0.0, 1.0)
+    surv_drive = np.clip(surv * (0.36 + 0.64 * soft), 0.0, 1.0)
+    turb_drive = np.clip(turb_hp * (0.28 + 0.72 * soft) + 0.12 * soft, 0.0, 1.0)
+
+    turbulence_drive = np.clip(
+        (
+            core_drive * 0.36
+            + plume_drive * 0.26
+            + puff_drive * 0.22
+            + surv_drive * 0.10
+            + turb_drive * 0.06
+        )
+        * st,
+        0.0,
+        1.0,
+    )
+    band_floor = np.clip(soft * core + (1.0 - soft) * 0.18, 0.18, 0.62)
+    turbulence_drive = np.clip(np.maximum(turbulence_drive, band_floor * st), 0.0, 1.0)
+    turbulence_drive = np.clip(
+        np.maximum(turbulence_drive, dust_lane * 0.48 + shell * 0.22), 0.0, 1.0
+    )
+
+    if lon_asymmetry is not None:
+        lon = np.clip(np.asarray(lon_asymmetry, dtype=np.float64), 0.42, 1.62)
+        if lon.ndim == 1:
+            lon = np.broadcast_to(lon.reshape(1, -1), (h, w))
+        elif lon.shape != (h, w):
+            lon = _resize_bilinear(lon, h, w, periodic_x=periodic_x)
+        turbulence_drive = np.clip(turbulence_drive * (0.82 + 0.22 * (lon - 1.0)), 0.0, 1.0)
+
+    pole = latitude_plane_gate(h, sigma=0.44, power=1.08)
+    if pole.ndim == 1:
+        pole = pole.reshape(h, 1)
+    pole2d = np.broadcast_to(pole, (h, w))
+    turbulence_drive = np.clip(turbulence_drive * pole2d, 0.0, 1.0)
+    band_host = np.clip(band_host * pole2d, 0.0, 1.42)
+
+    puff_shell_w = np.clip(shell * turbulence_drive, 0.0, 1.0)
+    puff_weight = np.clip(
+        puff_drive * turbulence_drive * (0.28 + 0.72 * shell) + lane * pf * 0.12,
+        0.0,
+        1.0,
+    )
+    vertical_weight = np.clip(
+        plume_drive * turbulence_drive * (0.40 + 0.60 * shell), 0.0, 1.0
+    )
+    reinject_weight = np.clip((surv_drive * 0.55 + plume_drive * 0.45) * turbulence_drive, 0.0, 1.0)
+    survival_weight = np.clip(surv * band_host, 0.0, 1.0)
+    turb_latent_weight = np.clip(turb_drive * turbulence_drive, 0.0, 1.0)
+
+    competed = _softmax_compete_channels(
+        [
+            dust_lane,
+            puff_weight,
+            vertical_weight,
+            reinject_weight,
+            turb_latent_weight,
+            survival_weight,
+            negative_space,
+            puff_shell_w,
+        ],
+        competition=float(type_competition),
+    )
+    (
+        dust_lane,
+        puff_weight,
+        vertical_weight,
+        reinject_weight,
+        turb_latent_weight,
+        survival_weight,
+        negative_space,
+        puff_shell_w,
+    ) = competed
+
+    return StructureArchitectureWeights(
+        band_host=band_host.astype(np.float64),
+        turbulence_drive=turbulence_drive.astype(np.float64),
+        puff_weight=np.clip(puff_weight, 0.0, 1.0).astype(np.float64),
+        vertical_weight=np.clip(vertical_weight, 0.0, 1.0).astype(np.float64),
+        reinject_weight=np.clip(reinject_weight, 0.0, 1.0).astype(np.float64),
+        dust_lane_weight=np.clip(dust_lane, 0.0, 1.0).astype(np.float64),
+        puff_shell_weight=np.clip(puff_shell_w, 0.0, 1.0).astype(np.float64),
+        negative_space_weight=np.clip(negative_space, 0.0, 1.0).astype(np.float64),
+        survival_weight=np.clip(survival_weight, 0.0, 1.0).astype(np.float64),
+        turb_latent_weight=np.clip(turb_latent_weight, 0.0, 1.0).astype(np.float64),
+    )
+
+
+# RGB legend for structure_type_map.png debug export (see build_structure_architecture_type_map).
+ARCHITECTURE_TYPE_COLORS: dict[str, tuple[float, float, float]] = {
+    "dust_lane": (0.72, 0.22, 0.12),
+    "puff": (0.13, 0.73, 0.93),
+    "vertical": (0.27, 0.87, 0.40),
+    "reinject": (0.92, 0.33, 0.67),
+    "turb": (0.93, 0.80, 0.13),
+    "survival": (0.65, 0.45, 0.28),
+    "negative_space": (0.88, 0.90, 0.95),
+    "low_drive": (0.12, 0.12, 0.18),
+}
+
+
+def build_structure_architecture_type_map(
+    architecture: StructureArchitectureWeights,
+    *,
+    blend: bool = True,
+    low_drive_threshold: float = 0.12,
+) -> np.ndarray:
+    """RGB type map: which architecture channel dominates each pixel (debug tuning).
+
+    Red-brown=dust_lane, cyan=puff, green=vertical, magenta=reinject, yellow=turb,
+    brown=survival, pale=negative_space, dark=low ``turbulence_drive``.
+    Weighted blend when ``blend=True`` (mixed types); weights sharpened for clearer edges.
+    """
+    arch = architecture
+    drive = np.clip(arch.turbulence_drive, 0.0, 1.0)
+    h, w = drive.shape
+    sharp = lambda w: np.clip(np.asarray(w, dtype=np.float64), 0.0, 1.0) ** 1.52
+
+    channels: list[tuple[np.ndarray, tuple[float, float, float]]] = [
+        (sharp(arch.dust_lane_weight), ARCHITECTURE_TYPE_COLORS["dust_lane"]),
+        (sharp(arch.puff_weight), ARCHITECTURE_TYPE_COLORS["puff"]),
+        (sharp(arch.vertical_weight), ARCHITECTURE_TYPE_COLORS["vertical"]),
+        (sharp(arch.reinject_weight), ARCHITECTURE_TYPE_COLORS["reinject"]),
+        (sharp(arch.turb_latent_weight), ARCHITECTURE_TYPE_COLORS["turb"]),
+        (sharp(arch.survival_weight), ARCHITECTURE_TYPE_COLORS["survival"]),
+        (sharp(arch.negative_space_weight), ARCHITECTURE_TYPE_COLORS["negative_space"]),
+    ]
+    if blend:
+        rgb = np.zeros((h, w, 3), dtype=np.float64)
+        total = np.zeros((h, w), dtype=np.float64)
+        for wt, col in channels:
+            rgb += wt[..., np.newaxis] * np.asarray(col, dtype=np.float64)
+            total += wt
+        total = np.maximum(total, 1e-6)
+        rgb = rgb / total[..., np.newaxis]
+    else:
+        stacks = np.stack([c[0] for c in channels], axis=-1)
+        dominant = np.argmax(stacks, axis=-1)
+        palette = np.asarray([c[1] for c in channels], dtype=np.float64)
+        rgb = palette[dominant]
+    low = drive < float(np.clip(low_drive_threshold, 0.04, 0.35))
+    rgb[low] = np.asarray(ARCHITECTURE_TYPE_COLORS["low_drive"], dtype=np.float64)
+    rgb = np.clip(rgb * drive[..., np.newaxis], 0.0, 1.0)
+    return rgb.astype(np.float64)
 
 
 def build_structure_morph_host(
@@ -394,6 +797,7 @@ def decouple_dust_from_band_gate(
     *,
     periodic_x: bool = True,
     strength: float = 0.72,
+    architecture_drive: np.ndarray | None = None,
 ) -> np.ndarray:
     """Let dust_A bulge off the disk_weight rim where structure host exceeds the soft band."""
     s = float(np.clip(strength, 0.0, 1.2))
@@ -402,15 +806,186 @@ def decouple_dust_from_band_gate(
     soft = soften_band_envelope(disk_weight, (h, w), periodic_x=periodic_x, lat_blur_sigma=16.0, power=0.52)
     host = np.clip(np.asarray(morph_host, dtype=np.float64), 0.0, 1.42)
     punch = np.clip(host - soft * 0.82, 0.0, 1.0) ** 0.92
+    if architecture_drive is not None:
+        punch = np.clip(punch * np.clip(np.asarray(architecture_drive, dtype=np.float64), 0.0, 1.0), 0.0, 1.0)
     out = a.copy()
-    rim = soft < 0.52
+    rim = soft < 0.58
     if bool(np.any(rim)):
         lift = np.clip(0.10 + punch * 0.48 * s, 0.0, 0.58)
         out[rim] = np.clip(np.maximum(out[rim], lift[rim] * (0.35 + 0.65 * a[rim])), 0.06, 0.82)
-    peak = punch > float(np.percentile(punch[soft > 0.2], 72.0)) if bool(np.any(soft > 0.2)) else 0.45
+    band = soft >= 0.22
+    if bool(np.any(band)):
+        lift_b = np.clip(0.08 + punch * 0.32 * s, 0.0, 0.48)
+        out[band] = np.clip(np.maximum(out[band], lift_b[band] * (0.42 + 0.58 * a[band])), 0.06, 0.82)
+    peak = punch > float(np.percentile(punch[soft > 0.18], 70.0)) if bool(np.any(soft > 0.18)) else 0.45
     if bool(np.any(peak)):
-        out[peak] = np.clip(out[peak] + punch[peak] * 0.22 * s, 0.06, 0.85)
+        out[peak] = np.clip(out[peak] + punch[peak] * 0.14 * s, 0.06, 0.85)
     return out.astype(np.float64)
+
+
+def blend_fluffy_cloud_texture_into_morph_dust(
+    dust_absorption: np.ndarray,
+    puff_soft: np.ndarray,
+    vertical_extent: np.ndarray,
+    latent_turb: np.ndarray,
+    morph_host: np.ndarray,
+    disk_weight: np.ndarray,
+    *,
+    periodic_x: bool = True,
+    strength: float = 0.78,
+    architecture: StructureArchitectureWeights | None = None,
+) -> np.ndarray:
+    """Spread cotton-ball texture through band via architecture weights (or legacy rim gate)."""
+    from starsky_gen.procedural_noise import gaussian_blur_pil
+
+    s = float(np.clip(strength, 0.0, 1.25))
+    if s < 1e-6:
+        return np.clip(dust_absorption, 0.0, 1.0).astype(np.float64)
+    a = np.clip(np.asarray(dust_absorption, dtype=np.float64), 0.0, 1.0)
+    h, w = a.shape
+    pf = np.clip(np.asarray(puff_soft, dtype=np.float64), 0.0, 1.0)
+    if pf.shape != (h, w):
+        pf = _resize_bilinear(pf, h, w, periodic_x=periodic_x)
+    ve = np.clip(np.asarray(vertical_extent, dtype=np.float64), 0.0, 1.0)
+    if ve.shape != (h, w):
+        ve = _resize_bilinear(ve, h, w, periodic_x=periodic_x)
+    turb = np.clip(np.asarray(latent_turb, dtype=np.float64), 0.0, 1.0)
+    scale = float(max(h, w))
+    sig = float(np.clip(scale * 0.009, 0.8, 9.0))
+    turb_hp = np.clip(turb - gaussian_blur_pil(turb, sig, periodic_x=periodic_x) * 0.74, 0.0, 1.0)
+    cloud = np.clip(pf**0.90 * 0.58 + ve**0.85 * 0.28 + turb_hp * 0.14, 0.0, 1.0)
+    cloud = gaussian_blur_pil(cloud, sig * 1.15, periodic_x=periodic_x)
+    target = np.clip(0.22 + cloud * 0.62, 0.08, 0.78)
+    if architecture is not None:
+        w = np.clip(architecture.turbulence_drive * s * 0.55, 0.0, 1.0)
+    else:
+        host = np.clip(np.asarray(morph_host, dtype=np.float64), 0.0, 1.42)
+        soft = soften_band_envelope(disk_weight, (h, w), periodic_x=periodic_x, lat_blur_sigma=14.0, power=0.52)
+        w = np.clip(host * (0.42 + 0.58 * (1.0 - soft**0.78)), 0.0, 1.0) * s * 0.42
+    return np.clip(a * (1.0 - w * 0.58) + target * w * 0.42 + a * w * 0.58, 0.06, 0.82).astype(
+        np.float64
+    )
+
+
+def apply_inner_dust_subband(
+    dust_absorption: np.ndarray,
+    architecture: StructureArchitectureWeights,
+    *,
+    periodic_x: bool = True,
+    strength: float = 0.88,
+) -> np.ndarray:
+    """Raise absorption on the inner dust lane (dark sub-band inside the galactic band)."""
+    s = float(np.clip(strength, 0.0, 1.25))
+    if s < 1e-6:
+        return np.clip(dust_absorption, 0.0, 1.0).astype(np.float64)
+    a = np.clip(np.asarray(dust_absorption, dtype=np.float64), 0.0, 1.0)
+    lane = np.clip(np.asarray(architecture.dust_lane_weight, dtype=np.float64), 0.0, 1.0)
+    if lane.shape != a.shape:
+        lane = _resize_bilinear(lane, a.shape[0], a.shape[1], periodic_x=periodic_x)
+    target = np.clip(0.46 + lane * 0.30, 0.26, 0.82)
+    w = lane * s * 0.58
+    return np.clip(a * (1.0 - w * 0.36) + target * w * 0.50 + a * w * 0.50, 0.08, 0.86).astype(
+        np.float64
+    )
+
+
+def apply_band_negative_space_transmission(
+    transmission: np.ndarray,
+    architecture: StructureArchitectureWeights,
+    *,
+    void_floor: float = 0.06,
+    strength: float = 0.72,
+) -> np.ndarray:
+    """Open clear pockets in the puff shell (negative space between clouds)."""
+    s = float(np.clip(strength, 0.0, 1.2))
+    if s < 1e-6:
+        return np.clip(transmission, void_floor, 1.0).astype(np.float64)
+    vf = float(np.clip(void_floor, 0.01, 0.2))
+    t = np.clip(np.asarray(transmission, dtype=np.float64), vf, 1.0)
+    neg = np.clip(np.asarray(architecture.negative_space_weight, dtype=np.float64), 0.0, 1.0)
+    if neg.shape != t.shape:
+        neg = _resize_bilinear(neg, t.shape[0], t.shape[1], periodic_x=True)
+    gap = neg * s * 0.58
+    return np.clip(t + gap * (1.0 - t) * 0.62, vf, 1.0).astype(np.float64)
+
+
+def apply_structure_architecture_pipeline(
+    dust_absorption: np.ndarray,
+    architecture: StructureArchitectureWeights,
+    vertical_extent: np.ndarray,
+    structure_survival: np.ndarray,
+    puff_field: np.ndarray,
+    puff_rng: np.random.Generator,
+    latent_turb: np.ndarray,
+    latent_ridge: np.ndarray,
+    disk_weight: np.ndarray,
+    *,
+    periodic_x: bool = True,
+    reinject_strength: float = 0.88,
+    puff_inject_strength: float = 0.42,
+    cloud_blend_strength: float = 0.92,
+    inner_dust_lane_strength: float = 0.88,
+    decouple_primary: float = 0.72,
+    decouple_secondary: float = 0.55,
+) -> np.ndarray:
+    """Apply reinject → decouple → puff inject → cloud blend using shared architecture weights."""
+    arch = architecture
+    a = reinject_vertical_dust_structure(
+        dust_absorption,
+        vertical_extent,
+        structure_survival,
+        latent_turb,
+        latent_ridge,
+        disk_weight,
+        periodic_x=periodic_x,
+        strength=reinject_strength,
+        drive_weight=arch.reinject_weight,
+        vertical_extent_drive=arch.vertical_weight,
+    )
+    puff_soft = gaussian_blur_pil(
+        np.clip(puff_field, 0.0, 1.0),
+        float(np.clip(max(a.shape) * 0.011, 1.0, 9.0)),
+        periodic_x=periodic_x,
+    )
+    a = decouple_dust_from_band_gate(
+        a,
+        arch.band_host,
+        disk_weight,
+        periodic_x=periodic_x,
+        strength=decouple_primary,
+        architecture_drive=arch.turbulence_drive,
+    )
+    a = inject_band_cloud_puffs(
+        a,
+        arch.band_host,
+        puff_rng,
+        periodic_x=periodic_x,
+        strength=puff_inject_strength,
+        host_weight=arch.puff_weight,
+    )
+    a = decouple_dust_from_band_gate(
+        a,
+        arch.band_host,
+        disk_weight,
+        periodic_x=periodic_x,
+        strength=decouple_secondary,
+        architecture_drive=arch.turbulence_drive,
+    )
+    a = blend_fluffy_cloud_texture_into_morph_dust(
+        a,
+        puff_soft,
+        puff_field,
+        latent_turb,
+        arch.band_host,
+        disk_weight,
+        periodic_x=periodic_x,
+        strength=cloud_blend_strength,
+        architecture=arch,
+    )
+    a = apply_inner_dust_subband(
+        a, arch, periodic_x=periodic_x, strength=inner_dust_lane_strength
+    )
+    return np.clip(a, 0.06, 0.88).astype(np.float64)
 
 
 def build_asymmetric_band_bleed_envelope(
@@ -479,8 +1054,10 @@ def reinject_vertical_dust_structure(
     *,
     periodic_x: bool = True,
     strength: float = 0.78,
+    drive_weight: np.ndarray | None = None,
+    vertical_extent_drive: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Restore torn edges, cavities, and wispy fragments on vertical dust plumes in dust_A."""
+    """Restore torn edges, cavities, and wispy fragments; optional architecture weight maps."""
     s = float(np.clip(strength, 0.0, 1.35))
     if s < 1e-6:
         return np.clip(dust_absorption, 0.0, 1.0).astype(np.float64)
@@ -515,7 +1092,19 @@ def reinject_vertical_dust_structure(
     tear = np.clip(fragment - gaussian_blur_pil(fragment, med_sig, periodic_x=periodic_x) * 0.70, 0.0, 1.0)
     cavity = np.clip(ve_med * 0.55 - fragment * 0.42, 0.0, 1.0) ** 1.18
     plume = off * (0.48 + 0.52 * np.clip(surv / 1.35, 0.0, 1.0))
+    band_plume = np.clip(soft_env * (0.40 + 0.60 * ve), 0.0, 1.0)
+    plume = np.clip(np.maximum(plume, band_plume * 0.72), 0.0, 1.0)
+    if vertical_extent_drive is not None:
+        ve_d = np.clip(np.asarray(vertical_extent_drive, dtype=np.float64), 0.0, 1.0)
+        if ve_d.shape != (h, w):
+            ve_d = _resize_bilinear(ve_d, h, w, periodic_x=periodic_x)
+        plume = np.clip(np.maximum(plume, ve_d * (0.38 + 0.62 * soft_env)), 0.0, 1.0)
     mod = s * (0.30 + 0.70 * plume)
+    if drive_weight is not None:
+        dwt = np.clip(np.asarray(drive_weight, dtype=np.float64), 0.0, 1.0)
+        if dwt.shape != (h, w):
+            dwt = _resize_bilinear(dwt, h, w, periodic_x=periodic_x)
+        mod = mod * (0.28 + 0.72 * dwt)
     out = np.clip(a + plume * mod * 0.24 + fragment * mod * 0.20 + tear * mod * 0.22, 0.06, 0.88)
     out = np.clip(out * (1.0 - cavity * mod * 0.14 * np.clip(a, 0.35, 1.0)), 0.06, 0.88)
     pole = latitude_plane_gate(h, sigma=0.40, power=1.16)
@@ -528,7 +1117,7 @@ def reinject_vertical_dust_structure(
         out[halo] = np.clip(np.maximum(out[halo], bleed[halo] * s * 0.72), 0.08, 0.48)
     out_hp = np.clip(out - gaussian_blur_pil(out, med_sig, periodic_x=periodic_x) * 0.74, -0.35, 0.35)
     core = soft_env > 0.28
-    out[core] = np.clip(out[core] + out_hp[core] * s * 0.34, 0.06, 0.88)
+    out[core] = np.clip(out[core] + out_hp[core] * s * 0.12, 0.06, 0.88)
     return out.astype(np.float64)
 
 
@@ -661,7 +1250,7 @@ def apply_brutal_erasure_transmission(
     survival_floor: float,
     periodic_x: bool = True,
 ) -> np.ndarray:
-    """Carve torn lanes (high-pass brutal), not smooth round extinction caps."""
+    """Carve torn lanes with soft shoulders (blurred carve), not razor caps."""
     floor = float(np.clip(survival_floor, 0.02, 0.12))
     t = np.clip(np.asarray(transmission, dtype=np.float64), floor, 1.0)
     b = np.clip(np.asarray(brutal, dtype=np.float64), 0.0, 1.0)
@@ -673,9 +1262,47 @@ def apply_brutal_erasure_transmission(
     thr_b = float(np.percentile(b, 78.0))
     blob = np.clip(b - thr_b, 0.0, 1.0) ** 1.22
     carve = np.maximum(b_lane, np.maximum(hp * 0.62, blob * 0.42)) * (1.0 - floor) * 0.90
+    # Feather carve so deep windows keep soft volumetric shoulders.
+    carve = gaussian_blur_pil(
+        carve, float(np.clip(scale * 0.010, 1.2, 12.0)), periodic_x=periodic_x
+    )
     cap = floor + (1.0 - floor) * (1.0 - b_lane) ** 2.35
     erased = np.clip(t * (1.0 - carve), floor, 1.0)
     return np.minimum(erased, cap).astype(np.float64)
+
+
+def apply_low_frequency_band_warp(
+    field: np.ndarray,
+    *,
+    amplitude: float = 0.07,
+    periodic_x: bool = True,
+) -> np.ndarray:
+    """Bend a band field in latitude with a wrap-safe low-frequency longitude warp."""
+    amp = float(np.clip(amplitude, 0.0, 0.22))
+    a = np.asarray(field, dtype=np.float64)
+    if amp < 1e-6 or a.ndim != 2:
+        return a
+    from scipy.ndimage import map_coordinates
+
+    h, w = int(a.shape[0]), int(a.shape[1])
+    xx = np.linspace(0.0, 1.0, w, endpoint=False, dtype=np.float64)
+    # Two harmonics: slow primary bend + mild secondary so the plane is not a ruler.
+    offset = amp * np.sin(2.0 * np.pi * xx) + 0.42 * amp * np.sin(4.0 * np.pi * xx + 0.85)
+    row_shift = offset * (0.5 * float(h - 1))
+    yy = np.arange(h, dtype=np.float64)[:, None]
+    xx_i = np.arange(w, dtype=np.float64)[None, :]
+    src_y = np.clip(yy - row_shift[None, :], 0.0, float(h - 1))
+    src_x = np.broadcast_to(xx_i, (h, w)).astype(np.float64)
+    if periodic_x:
+        src_x = np.mod(src_x, float(w))
+    warped = map_coordinates(
+        a,
+        [src_y.ravel(), src_x.ravel()],
+        order=1,
+        mode="nearest",
+        prefilter=False,
+    ).reshape(h, w)
+    return np.clip(warped, 0.0, None).astype(np.float64)
 
 
 def scatter_disaster_lon_peaks(
@@ -965,20 +1592,28 @@ def build_gold_population_field(
     legacy = np.clip((1.0 - sf) ** 1.55 * g**0.88 * (0.38 + 0.62 * ridge_old), 0.0, 1.0)
     raw = np.clip(raw + legacy * 0.34, 0.0, 1.0)
     raw = local_field_variance_stretch(
-        raw, variance=float(np.clip(patchiness, 0.6, 2.0)) * 1.22, floor=0.0, ceiling=1.0
+        raw, variance=float(np.clip(patchiness, 0.6, 2.0)) * 0.92, floor=0.0, ceiling=1.0
     )
     dw = np.clip(np.asarray(disk_weight, dtype=np.float64), 0.0, 1.0)
-    band_mask = dw > 0.10
+    # Prefer midplane density so gold stays in the warm core, not shoulder islands.
+    dens = np.clip(np.asarray(stellar_density, dtype=np.float64), 0.0, 1.0)
+    raw = np.clip(0.28 * raw + 0.72 * dens * (0.22 + 0.78 * raw), 0.0, 1.0)
+    # Only normalize inside the true midplane (not the soft shoulders).
+    band_mask = dw > 0.55
     gold = raw.copy()
     if bool(np.any(band_mask)):
         sub = gold[band_mask]
-        lo = float(np.percentile(sub, 10.0))
-        hi = float(np.percentile(sub, 88.0))
+        lo = float(np.percentile(sub, 22.0))
+        hi = float(np.percentile(sub, 94.0))
         if hi > lo + 1e-8:
-            sub = np.clip((sub - lo) / (hi - lo), 0.0, 1.0) ** 0.66
+            sub = np.clip((sub - lo) / (hi - lo), 0.0, 1.0) ** 0.95
         gold[band_mask] = sub
-    off_plane = np.clip(1.0 - dw, 0.0, 1.0)
-    gold = np.clip(gold * (1.0 - 0.70 * off_plane), 0.0, 1.0)
+    gold = np.where(band_mask, gold, gold * 0.04)
+    # Razor disk + latitude falloff — disk_weight alone is still thick on visual shoulders.
+    lat = midplane_gold_lat_gate(int(dw.shape[0]), sigma=0.092, power=1.95)
+    gold = np.clip(gold * (dw**3.85) * lat, 0.0, 1.0)
+    gold = np.clip(gold / max(float(np.percentile(gold, 99.5)), 1e-6), 0.0, 1.0)
+    gold = np.clip(gold, 0.0, 1.0) ** 1.35
     return gold.astype(np.float64)
 
 
@@ -1322,27 +1957,22 @@ def build_morphology_ism_layers(
         rng=rng,
         channel_salt=1,
     )
-    gold = reinject_cloud_microstructure(
-        build_ism_scale_hierarchy(
-            build_cloud_texture_field(
-                np.clip(sf * (0.55 + 0.45 * g), 0.0, 1.0) * host,
-                tex2,
-                h,
-                w,
-                turb=turb,
-                periodic_x=periodic_x,
-            ),
+    # Soft gold body only — no microstructure reinject (avoids jagged shoulder flecks).
+    gold = build_ism_scale_hierarchy(
+        build_cloud_texture_field(
+            np.clip(sf * (0.55 + 0.45 * g), 0.0, 1.0) * host,
             tex2,
             h,
             w,
-            strength=hs * 0.94,
+            turb=turb,
             periodic_x=periodic_x,
-            turbulence_weight=1.45,
-            channel_salt=2,
         ),
+        tex2,
+        h,
+        w,
+        strength=hs * 0.78,
         periodic_x=periodic_x,
-        detail_mix=0.78,
-        rng=rng,
+        turbulence_weight=1.05,
         channel_salt=2,
     )
     black_base = local_field_variance_stretch(
@@ -1369,18 +1999,63 @@ def build_morphology_ism_layers(
     )
     wb = float(np.clip(white_brightness, 0.7, 1.8))
     white_rgb = np.clip(
-        white[..., np.newaxis] * np.array([0.90, 0.92, 0.96], dtype=np.float64) * (0.62 * wb),
+        white[..., np.newaxis] * np.array([0.98, 0.96, 0.88], dtype=np.float64) * (0.62 * wb),
         0.0,
         1.0,
     )
+    gp = np.clip(galactic.gold_population_weight, 0.0, 1.0)
+    gp_soft = gaussian_blur_pil(
+        gp, float(np.clip(max(h, w) * 0.018, 2.0, 16.0)), periodic_x=periodic_x
+    )
+    dens_for_gold = gaussian_blur_pil(
+        np.clip(g, 0.0, 1.0), float(np.clip(max(h, w) * 0.014, 1.5, 12.0)), periodic_x=periodic_x
+    )
+    gp_soft = np.clip(0.55 * dens_for_gold + 0.45 * gp_soft, 0.0, 1.0)
+    gp_soft = gp_soft / max(float(np.percentile(gp_soft, 99.5)), 1e-6)
+    gp_soft = np.clip(gp_soft, 0.0, 1.0) ** 1.20
+    # Stronger pre-emit blur so gold reads as warm midplane core, not HF streaks.
+    gold_soft = gaussian_blur_pil(
+        gold, float(np.clip(max(h, w) * 0.024, 2.5, 22.0)), periodic_x=periodic_x
+    )
+    # Soft body only (extra blur) — body HF must not become midplane gold dashes.
+    body_soft = gaussian_blur_pil(
+        body, float(np.clip(max(h, w) * 0.018, 2.0, 16.0)), periodic_x=periodic_x
+    )
     gold_emit_rgb = np.clip(
-        gold[..., np.newaxis] * np.array([0.82, 0.74, 0.58], dtype=np.float64) * 0.72
-        + body[..., np.newaxis] * np.array([0.58, 0.52, 0.44], dtype=np.float64) * 0.34,
+        gold_soft[..., np.newaxis] * np.array([1.02, 0.86, 0.48], dtype=np.float64) * 0.12
+        + body_soft[..., np.newaxis] * np.array([0.72, 0.64, 0.44], dtype=np.float64) * 0.05,
+        0.0,
+        1.0,
+    )
+    # Razor midplane gate — shoulder latitudes must go to ~0.
+    soft_dw = soften_band_envelope(galactic.disk_weight, (h, w), periodic_x=periodic_x)
+    dw_raw = np.clip(np.asarray(galactic.disk_weight, dtype=np.float64), 0.0, 1.0)
+    lat_gate = midplane_gold_lat_gate(h, sigma=0.090, power=2.05)
+    dw_gate = np.clip((dw_raw**4.0) * (soft_dw**1.15) * lat_gate, 0.0, 1.0)
+    # Modest gold spine boost only where disk is truly high (warm core, no shoulders).
+    spine = np.clip(dw_raw**4.2 * lat_gate, 0.0, 1.0)
+    gold_emit_rgb = np.clip(
+        gold_emit_rgb
+        * (0.12 + 0.88 * gp_soft[..., np.newaxis])
+        * dw_gate[..., np.newaxis]
+        * (0.72 + 0.72 * spine[..., np.newaxis]),
+        0.0,
+        1.0,
+    )
+    # Extra boost only in the central ~35% of the tightened gold weight (spine core).
+    gold_w = np.clip(gp_soft * lat_gate, 0.0, 1.0)
+    nz = gold_w > 1e-5
+    core_mask = np.zeros_like(gold_w)
+    if bool(np.any(nz)):
+        thr_core = float(np.percentile(gold_w[nz], 65.0))
+        core_mask = (gold_w >= thr_core).astype(np.float64)
+    gold_emit_rgb = np.clip(
+        gold_emit_rgb * (1.0 + 0.22 * core_mask[..., np.newaxis] * gold_w[..., np.newaxis]),
         0.0,
         1.0,
     )
     absorption_rgb = np.clip(
-        black[..., np.newaxis] * np.array([0.32, 0.26, 0.20], dtype=np.float64) * 0.88,
+        black[..., np.newaxis] * np.array([0.26, 0.24, 0.22], dtype=np.float64) * 0.88,
         0.0,
         1.0,
     )
@@ -1393,12 +2068,34 @@ def build_morphology_ism_layers(
         disk_weight=galactic.disk_weight,
         strength=1.05,
     )
+    # Light contrast + soft blur so red/orange H II reads as intentional clumps.
+    dens_soft = gaussian_blur_pil(
+        np.clip(g, 0.0, 1.0), float(np.clip(max(h, w) * 0.012, 1.2, 12.0)), periodic_x=periodic_x
+    )
+    red_dens = np.clip(hii_frag * dens_soft * (1.0 - 0.40 * gp_soft), 0.0, 1.0)
+    red_gate = red_dens > 1e-5
+    if bool(np.any(red_gate)):
+        thr = float(np.percentile(red_dens[red_gate], 70.0))
+        red_clump = np.clip((red_dens - thr) / max(1.0 - thr, 0.08), 0.0, 1.0) ** 1.50
+        red_clump = gaussian_blur_pil(
+            red_clump, float(np.clip(max(h, w) * 0.014, 1.4, 12.0)), periodic_x=periodic_x
+        )
+    else:
+        red_clump = red_dens
     red_hii_rgb = np.clip(
-        hii_frag[..., np.newaxis] * np.array([1.28, 0.34, 0.26], dtype=np.float64) * 1.14,
+        red_clump[..., np.newaxis] * np.array([1.42, 0.34, 0.16], dtype=np.float64) * 1.38,
         0.0,
         1.0,
     )
-    rgb = np.maximum(white_rgb + gold_emit_rgb - absorption_rgb * 0.42, 0.0)
+    soft_env = soften_band_envelope(galactic.disk_weight, (h, w), periodic_x=periodic_x)
+    from starsky_gen.dust_field import _band_host_gate
+
+    core = _band_host_gate(galactic.disk_weight, (h, w)) > 0.40
+    env = np.ones((h, w), dtype=np.float64)
+    rim = (~core) & (soft_env < 0.92)
+    if bool(np.any(rim)):
+        env[rim] = np.clip(0.28 + 0.72 * soft_env[rim], 0.0, 1.0)
+    # HF detail on white/absorption only — never sculpt gold into shoulder flecks.
     scale = float(max(h, w))
     fine_sig = float(np.clip(scale * 0.0022, 0.35, 3.5))
     white_hi = np.clip(
@@ -1414,30 +2111,25 @@ def build_morphology_ism_layers(
         1.0,
     )
     ds = float(np.clip(detail_strength, 0.6, 1.6))
-    lu_pre = np.clip(
-        rgb[..., 0] * 0.2126 + rgb[..., 1] * 0.7152 + rgb[..., 2] * 0.0722, 0.0, 1.0
+    non_gold = np.maximum(white_rgb - absorption_rgb * 0.42, 0.0)
+    lu_ng = np.clip(
+        non_gold[..., 0] * 0.2126 + non_gold[..., 1] * 0.7152 + non_gold[..., 2] * 0.0722,
+        0.0,
+        1.0,
     )
-    detail_amp = detail[..., np.newaxis] * lu_pre[..., np.newaxis] * (0.14 * ds)
-    rgb = np.maximum(rgb * (0.68 + 0.32 * detail[..., np.newaxis]) + detail_amp, 0.0)
-    soft_env = soften_band_envelope(galactic.disk_weight, (h, w), periodic_x=periodic_x)
-    from starsky_gen.dust_field import _band_host_gate
-
-    core = _band_host_gate(galactic.disk_weight, (h, w)) > 0.40
-    env = np.ones((h, w), dtype=np.float64)
-    rim = (~core) & (soft_env < 0.92)
-    if bool(np.any(rim)):
-        env[rim] = np.clip(0.28 + 0.72 * soft_env[rim], 0.0, 1.0)
-    rgb = rgb * env[..., np.newaxis]
+    detail_amp = detail[..., np.newaxis] * lu_ng[..., np.newaxis] * (0.14 * ds)
+    non_gold = np.maximum(non_gold * (0.68 + 0.32 * detail[..., np.newaxis]) + detail_amp, 0.0)
     puff_ism = build_fine_puff_field(
         rng, h, w, periodic_x=periodic_x, strength=1.0, center_boost=1.0
     )
     puff_mod = np.clip(0.40 + 1.02 * puff_ism**1.10, 0.0, 1.62)
     mod3 = puff_mod[..., np.newaxis]
-    gold_emit_rgb = np.clip(gold_emit_rgb * mod3, 0.0, 1.0)
+    # Keep gold soft — do not re-amplify with puff HF (shoulder fleck source).
     red_hii_rgb = np.clip(red_hii_rgb * mod3, 0.0, 1.0)
     white_rgb = np.clip(white_rgb * mod3, 0.0, 1.0)
     absorption_rgb = np.clip(absorption_rgb * mod3, 0.0, 1.0)
-    rgb = np.clip(rgb * mod3, 0.0, 1.0)
+    non_gold = np.clip(non_gold * mod3, 0.0, 1.0)
+    rgb = np.maximum(non_gold + gold_emit_rgb, 0.0) * env[..., np.newaxis]
     luma = np.clip(rgb[..., 0] * 0.2126 + rgb[..., 1] * 0.7152 + rgb[..., 2] * 0.0722, 0.0, 1.0)
     mu = luma[..., np.newaxis]
     rgb = np.clip(rgb * 0.91 + mu * 0.09, 0.0, 1.0)
@@ -1489,59 +2181,72 @@ def build_fine_puff_field(
     strength: float = 1.0,
     center_boost: float = 1.0,
 ) -> np.ndarray:
-    """Dense small puffy clouds (ridged cells + micro speckle), like ref. cotton-ball band texture."""
+    """Soft cotton-ball cloud density (FBM body + light detail, not ridged cells)."""
+    from starsky_gen.procedural_noise import gaussian_blur_pil
+
     h, w = int(height), int(width)
     s = float(np.clip(strength, 0.0, 1.5))
     if s < 1e-6:
         return np.zeros((h, w), dtype=np.float64)
     scale = float(max(h, w))
     rng_b = np.random.default_rng(int(rng.integers(0, 2**31 - 1)) ^ 0xF10E)
-    rng_c = np.random.default_rng(int(rng.integers(0, 2**31 - 1)) ^ 0xAC7E)
-    ch_a, cw_a = max(48, h // 20), max(56, w // 15)
-    meso = ridged_fbm2d(
+    ch_a, cw_a = max(96, h // 8), max(56, w // 12)
+    base = fbm2d(
         rng,
         ch_a,
         cw_a,
-        base_scale=0.92,
+        base_scale=0.14,
         octaves=5,
         periodic_x=periodic_x,
-        elongate_along_x=1.04,
+        elongate_along_x=1.35,
     )
-    meso = _resize_bilinear(meso, h, w, periodic_x=periodic_x)
-    cell = np.clip(1.0 - np.abs(meso * 2.0 - 1.0), 0.0, 1.0) ** 1.72
-    ch_b, cw_b = max(56, h // 14), max(64, w // 11)
-    speck = fbm2d(
+    base = _resize_bilinear(base, h, w, periodic_x=periodic_x)
+    ch_b, cw_b = max(56, h // 12), max(64, w // 10)
+    detail = fbm2d(
         rng_b,
         ch_b,
         cw_b,
-        base_scale=1.08,
-        octaves=4,
-        periodic_x=periodic_x,
-        elongate_along_x=1.02,
-    )
-    speck = _resize_bilinear(speck, h, w, periodic_x=periodic_x)
-    speck_sig = float(np.clip(scale * 0.0028, 0.28, 3.8))
-    speck_hi = np.clip(speck - gaussian_blur_pil(speck, speck_sig, periodic_x=periodic_x) * 0.68, 0.0, 1.0) ** 1.08
-    ch_c, cw_c = max(64, h // 10), max(72, w // 8)
-    micro = ridged_fbm2d(
-        rng_c,
-        ch_c,
-        cw_c,
-        base_scale=1.22,
+        base_scale=0.22,
         octaves=4,
         periodic_x=periodic_x,
         elongate_along_x=1.0,
     )
-    micro = _resize_bilinear(micro, h, w, periodic_x=periodic_x)
-    micro_puff = np.clip(1.0 - np.abs(micro * 2.0 - 1.0), 0.0, 1.0) ** 2.05
-    soft = gaussian_blur_pil(cell, float(np.clip(scale * 0.0042, 0.35, 4.2)), periodic_x=periodic_x)
-    puffs = np.clip(cell * 0.36 + speck_hi * 0.38 + micro_puff * 0.28 + soft * 0.05, 0.0, 1.0) ** 1.06
+    detail = _resize_bilinear(detail, h, w, periodic_x=periodic_x)
+    rng_c = np.random.default_rng(int(rng.integers(0, 2**31 - 1)) ^ 0xAC7E)
+    ch_c, cw_c = max(40, h // 14), max(48, w // 10)
+    ridge = ridged_fbm2d(
+        rng_c,
+        ch_c,
+        cw_c,
+        base_scale=0.38,
+        octaves=3,
+        periodic_x=periodic_x,
+        elongate_along_x=1.0,
+    )
+    ridge = _resize_bilinear(ridge, h, w, periodic_x=periodic_x)
+    ridge_blur = gaussian_blur_pil(
+        ridge, float(np.clip(scale * 0.012, 1.0, 10.0)), periodic_x=periodic_x
+    )
+    ridge_tex = np.clip((ridge - ridge_blur * 0.82) * 1.1, 0.0, 1.0) ** 1.05 * 0.03
+    body = np.clip(base * 0.74 + detail * 0.24 + ridge_tex, 0.0, 1.0) ** 0.92
+    sig_body = float(np.clip(scale * 0.0085, 1.0, 7.5))
+    puffs = gaussian_blur_pil(body, sig_body, periodic_x=periodic_x)
+    detail = np.clip(
+        body - gaussian_blur_pil(body, sig_body * 0.55, periodic_x=periodic_x),
+        0.0,
+        1.0,
+    ) ** 0.92
+    puffs = np.clip(puffs + detail * 0.32, 0.0, 1.0)
+    puffs = gaussian_blur_pil(puffs, sig_body * 0.28, periodic_x=periodic_x)
     cb = float(np.clip(center_boost, 0.0, 1.5))
     if cb > 1e-6:
         xx = np.linspace(-1.0, 1.0, w, dtype=np.float64)[np.newaxis, :]
         yy = np.linspace(-1.0, 1.0, h, dtype=np.float64)[:, np.newaxis]
         core = np.exp(-(xx**2) / 0.16) * np.exp(-((yy * 0.92) ** 2) / 0.11)
         puffs = np.clip(puffs * (0.48 + 0.52 * core**0.85) ** cb, 0.0, 1.0)
+    from starsky_gen.dust_field import attenuate_row_comb
+
+    puffs = attenuate_row_comb(puffs, None, strength=0.62)
     return np.clip(puffs * s, 0.0, 1.0).astype(np.float64)
 
 
@@ -1552,32 +2257,42 @@ def inject_band_cloud_puffs(
     *,
     periodic_x: bool = True,
     strength: float = 0.36,
+    host_weight: np.ndarray | None = None,
 ) -> np.ndarray:
     """Add tiny cloud pockets to band dust absorption (constructive, not a flat slab)."""
     from starsky_gen.dust_field import _band_host_gate
 
     a = np.clip(np.asarray(absorption, dtype=np.float64), 0.0, 1.0)
     h, w = a.shape
-    gate = _band_host_gate(band_weight, (h, w)) > 0.20
+    if host_weight is not None:
+        hw = np.clip(np.asarray(host_weight, dtype=np.float64), 0.0, 1.0)
+        if hw.shape != (h, w):
+            hw = _resize_bilinear(hw, h, w, periodic_x=periodic_x)
+        gate = hw > 0.14
+    else:
+        gate = _band_host_gate(band_weight, (h, w)) > 0.20
     if not bool(np.any(gate)):
         return a
     puffs = build_fine_puff_field(rng, h, w, periodic_x=periodic_x, strength=1.0)
     s = float(np.clip(strength, 0.0, 0.75))
-    peaks = puffs**1.14
-    valleys = (1.0 - puffs) ** 1.06
+    from starsky_gen.procedural_noise import gaussian_blur_pil
+
+    scale = float(max(h, w))
+    puff_soft = gaussian_blur_pil(
+        puffs, float(np.clip(scale * 0.010, 1.0, 9.0)), periodic_x=periodic_x
+    )
+    peaks = puff_soft**0.88
+    valleys = (1.0 - puff_soft) ** 0.92
     out = a.copy()
     sub_a = a[gate]
     sub_p = peaks[gate]
     sub_v = valleys[gate]
-    out[gate] = np.clip(sub_a * (1.0 - sub_v * 0.20 * s) + sub_p * 0.26 * s, 0.06, 0.82)
-    punch_thr = float(np.percentile(peaks, 74.0))
-    punch = peaks >= punch_thr
-    if bool(np.any(punch)):
-        out[punch] = np.clip(
-            np.maximum(out[punch], a[punch] * 0.68 + peaks[punch] * 0.34 * s),
-            0.08,
-            0.85,
-        )
+    if host_weight is not None:
+        sub_w = np.clip(hw[gate], 0.14, 1.0)
+        s_loc = s * (0.40 + 0.60 * sub_w)
+    else:
+        s_loc = s
+    out[gate] = np.clip(sub_a * (1.0 - sub_v * 0.12 * s_loc) + sub_p * 0.14 * s_loc, 0.06, 0.82)
     return out.astype(np.float64)
 
 
@@ -1627,6 +2342,9 @@ def build_morphology_turbulent_gas_field(
     field = attenuate_column_comb(
         field, galactic.disk_weight, strength=0.44, periodic_x=periodic_x
     )
+    from starsky_gen.dust_field import attenuate_row_comb
+
+    field = attenuate_row_comb(field, galactic.disk_weight, strength=0.58)
     from starsky_gen.dust_field import band_relative_clearance
 
     clear = band_relative_clearance(

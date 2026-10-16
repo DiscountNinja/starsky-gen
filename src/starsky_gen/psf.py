@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Literal, TypedDict
+from typing import Literal, TypedDict, cast
 
 import numpy as np
 
@@ -403,30 +403,33 @@ def stamp_psf_patch(
     subpixel_dx: float = 0.0,
     subpixel_dy: float = 0.0,
 ) -> None:
-    """Add kernel * amplitude_rgb (per-channel) into float RGB canvas."""
-    ampl = np.ascontiguousarray(amplitude_rgb, dtype=np.float64).reshape((1, 1, -1))
-    patch = kern[..., np.newaxis] * ampl
+    """Add kernel * amplitude_rgb (per-channel) into float RGB canvas.
+
+    Vectorized (no meshgrid); bit-identical to the prior meshgrid path for the
+    same inputs (mask on float coords, then round).
+    """
+    ampl = np.asarray(amplitude_rgb, dtype=np.float64).reshape((1, 1, -1))
     h, wd, _cc = canvas.shape
-    kh, kw = kern.shape
-    cy = kh // 2
-    cx = kw // 2
-    iy0 = float(yi - cy) + float(subpixel_dy)
-    ix0 = float(xi - cx) + float(subpixel_dx)
+    kh, kw = int(kern.shape[0]), int(kern.shape[1])
+    iy0 = float(yi - kh // 2) + float(subpixel_dy)
+    ix0 = float(xi - kw // 2) + float(subpixel_dx)
     yi_row = iy0 + np.arange(kh, dtype=np.float64)
     xi_col = ix0 + np.arange(kw, dtype=np.float64)
-    yy_grid, xx_grid = np.meshgrid(yi_row, xi_col, indexing="ij")
-    vy = (yy_grid >= 0) & (yy_grid < h)
-    yy_i = np.clip(np.round(yy_grid).astype(np.int64), 0, h - 1)
+    # Mask on float sample coords (same as former meshgrid path), then round.
+    vy = (yi_row >= 0.0) & (yi_row < float(h))
+    if not bool(np.any(vy)):
+        return
+    yy_i = np.clip(np.round(yi_row).astype(np.int64), 0, h - 1)
+    xx_i = np.round(xi_col).astype(np.int64)
     if periodic_x:
-        xp_grid = np.mod(np.round(xx_grid).astype(np.int64), wd)
-        ii, jj = np.nonzero(vy)
-        canvas[yy_i[ii, jj], xp_grid[ii, jj]] += patch[ii, jj]
+        xx_i = np.mod(xx_i, wd)
+        canvas[yy_i[vy, None], xx_i[None, :]] += kern[vy, :, None] * ampl
     else:
-        sel = vy & (xx_grid >= 0) & (xx_grid < wd)
-        ii, jj = np.nonzero(sel)
-        canvas[yy_i[ii, jj], np.clip(np.round(xx_grid[ii, jj]).astype(np.int64), 0, wd - 1)] += patch[
-            ii, jj
-        ]
+        vx = (xi_col >= 0.0) & (xi_col < float(wd))
+        if not bool(np.any(vx)):
+            return
+        xx_i = np.clip(xx_i, 0, wd - 1)
+        canvas[yy_i[vy, None], xx_i[None, :][:, vx]] += kern[np.ix_(vy, vx)][..., None] * ampl
 
 
 def _split_psf_flux(
@@ -699,13 +702,15 @@ def stamp_star_psf(
     )
     if field_angle_rad is not None:
         elong = 1.0 + 0.06 * min(abs(field_angle_rad), 1.2)
-        params = dict(params)
-        params["sigma_x"] = float(params["sigma_x"]) * elong
-        params["sigma_y"] = float(params["sigma_y"]) / elong
+        stretched = dict(params)
+        stretched["sigma_x"] = float(params["sigma_x"]) * elong
+        stretched["sigma_y"] = float(params["sigma_y"]) / elong
+        params = cast(MoffatParams, stretched)
     csx, csy = chromatic_sigma_scales(bv=bv, teff_k=teff_k, tuning=t)
-    params = dict(params)
-    params["sigma_x"] = float(params["sigma_x"]) * csx * float(v.sigma_scale)
-    params["sigma_y"] = float(params["sigma_y"]) * csy * float(v.sigma_scale)
+    scaled = dict(params)
+    scaled["sigma_x"] = float(params["sigma_x"]) * csx * float(v.sigma_scale)
+    scaled["sigma_y"] = float(params["sigma_y"]) * csy * float(v.sigma_scale)
+    params = cast(MoffatParams, scaled)
     halo_sigma *= float(v.halo_scale)
     spec = spectral_rgb.astype(np.float64)
     cr, cg, cb = v.chroma_rgb

@@ -1,20 +1,23 @@
 # starsky-gen
 
-Photo Realistic starfield generator for games, skyboxes, and background assets.
+Cinematic AAA skybox / starfield generator for games. Wrap-safe equirectangular and cubemap output is the product contract; photo-documentary look is an opt-in secondary path.
 Low resolution sample:
 <img width="1024" height="512" alt="starsky-gen" src="https://github.com/user-attachments/assets/5cc44295-65b0-45b1-85ab-c474089b589a" />
 ## Features
 
 - Fully flag-driven Python CLI workflow (no interactive prompts).
+- **Cinematic look by default**: filmic tone, richer bloom, near-zero film grain, flat/wrap-safe exposure.
+- Realistic star and Milky Way color with magnitude/PSF stamping (sharp game stars, not stacked-photo noise).
 - Non-uniform, subtle star coloration with weighted distributions:
-  - White 65%, Blue 20%, Yellow 10%, Red 5%.
+    - White 65%, Blue 20%, Yellow 10%, Red 5%.
 - Weighted star sizes:
-  - Tiny (1px) 75%, Small (2-3px) 20%, Medium (4-6px) 4%, Large (7+) 1%.
+    - Tiny (1px) 75%, Small (2-3px) 20%, Medium (4-6px) 4%, Large (7+) 1%.
 - Asymmetric stars with cool-edge tinting for dominant white stars.
 - Background galactic-plane gradient (no flat black void).
 - Nebula modes: `distant`, `full`, `galaxy_streak`.
-- Output projections: `equirectangular`, `cubemap`, or `both`.
+- Output projections: `equirectangular`, `cubemap`, or `both` (seam-aware / wrap-safe).
 - Batch generation with per-render and total progress bars.
+- Optional `--look-target documentary` for the parked photo/long-exposure grade.
 - Optional JPEG artifact pass for subtle compression character.
 - Default background avoids pure black, using a noisy bluish-gray field with galactic-disk weighting.
 
@@ -72,8 +75,8 @@ Main output and run controls:
 - `--seed` (int, optional)
 - `--projection-mode` (`equirectangular|cubemap|both`, default `equirectangular`)
 - `--cube` / `-cube` (shortcut to include cubemap, sets projection to `both`)
-- `--output-format` (`png|jpg`, default `png`)
-- `--quality` (JPEG quality `50..100`, default `100`)
+- `--output-format` (`png|jpg|webp`, default `png`)
+- `--quality` (JPEG/WebP quality `50..100`, default `100`; ignored for PNG)
 - `--cubemap-face-size` (`128..4096`, default `1024`)
 
 Feature toggles:
@@ -85,7 +88,8 @@ Feature toggles:
 - `--background-gradient/--no-background-gradient`
 - `--black-background/--no-black-background`
 - `--jpeg-artifact-pass/--no-jpeg-artifact-pass`
-- `--long-exposure-look/--flat-exposure`
+- `--look-target` (`cinematic|documentary`, default `cinematic`)
+- `--long-exposure-look/--flat-exposure` (default flat / wrap-safe; documentary enables long-exposure)
 
 Background texture:
 
@@ -100,13 +104,15 @@ Nebula controls:
 - `--dust-strength` (`0.5..1.8`, default `1.14`)
 - `--nebula-debug-pass` (`normal|occluder_only|continuum_only`, default `normal`; galaxy_streak also supports noise-layer diagnostics such as `layer_filaments`, `layer_dust_alpha`, `mask_only`, `warp_vectors`)
 
-Photoreal / galaxy tuning:
+Look / galaxy tuning:
 
-- `--photoreal-stars` / `--classic-stars` (default photoreal)
+- `--look-target cinematic` — AAA wrap-safe vista (filmic, bloom up, grain down; default)
+- `--look-target documentary` — parked photo/long-exposure stack (asinh, grain, sensor ISP)
+- `--photoreal-stars` / `--classic-stars` (default magnitude+Moffat PSF stars)
 - `--mag-bright`, `--mag-faint`, `--band-star-density`
 - `--mag-exponent` (magnitude log slope)
-- `--asinh-gain`, `--asinh-q` (linear canvas stretch before display grade)
-- `--galaxy-tone-curve` (`reinhard|asinh|filmic|aces`, default `asinh`)
+- `--asinh-gain`, `--asinh-q` (linear canvas stretch; mainly documentary / asinh curve)
+- `--galaxy-tone-curve` (`reinhard|asinh|filmic|aces|acescct`, default `filmic`)
 - `--bulge-scale`, `--bulge-intensity`, `--dust-opacity`, `--nebula-color-strength`
 - `--emit-halpha-saturation`, `--emit-patch-strength`
 - `--split-toning-strength`, `--faint-star-chroma-desat`
@@ -114,12 +120,12 @@ Photoreal / galaxy tuning:
 - `--star-band-brightness-scale`, `--star-band-chroma-adapt`
 - `--nebula-emit-scale-with-stars`
 - `--star-display-stretch-gain` (`0` = auto white-point match)
-- `--no-sensor-noise` (disable Poisson/read noise)
+- `--no-sensor-noise` (sensor noise off by default under cinematic)
 
 Pipeline / morphology diagnostics:
 
 - `--render-profile` (`physical|physical_grade|full`, default `full`)
-- `--debug-layers` (write morphology, extinction, and star-layer PNGs under `<output-dir>/<name>_layers/`)
+- `--debug-layers` (write morphology, extinction, and star-layer PNGs under `<output-dir>/<name>_layers/`, including RGB `structure_type_map.png` — see [docs/usage.md](docs/usage.md#structure-architecture-weight--type-system))
 - `--grayscale-morphology` (add `morphology_gray.png` to the layer export)
 - `--morphology-void-strength`, `--morphology-scar-strength`
 

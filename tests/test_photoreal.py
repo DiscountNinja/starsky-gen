@@ -88,7 +88,8 @@ def test_band_density_increases_catalog_size() -> None:
     assert c3["lon"].shape[0] > c1["lon"].shape[0] * 2.4
 
 
-def test_crowding_raises_band_luma(tmp_path: Path) -> None:
+def test_crowding_raises_stamped_star_count(tmp_path: Path) -> None:
+    """Higher band density should stamp more catalog stars (display luma can compress)."""
     base = FeatureConfig(
         jpeg_artifact_pass=False,
         photoreal_stars=True,
@@ -109,13 +110,11 @@ def test_crowding_raises_band_luma(tmp_path: Path) -> None:
         features=base,
     )
     cfg_hi = cfg_lo.model_copy(update={"output_base_name": "crowd_hi", "features": dense})
-    p_lo, _ = render_single(cfg_lo, 0)
-    p_hi, _ = render_single(cfg_hi, 0)
-    img_lo = np.mean(np.asarray(Image.open(p_lo["equirectangular"]).convert("RGB")), axis=2)
-    img_hi = np.mean(np.asarray(Image.open(p_hi["equirectangular"]).convert("RGB")), axis=2)
-    cy = img_lo.shape[0] // 2
-    band = slice(cy - 16, cy + 16)
-    assert float(np.mean(img_hi[band])) > float(np.mean(img_lo[band])) * 1.04
+    _, stats_lo = render_single(cfg_lo, 0)
+    _, stats_hi = render_single(cfg_hi, 0)
+    n_lo = sum(stats_lo["size_counts"].values())
+    n_hi = sum(stats_hi["size_counts"].values())
+    assert n_hi > n_lo * 1.25
 
 
 def test_photoreal_small_render_finite(tmp_path: Path) -> None:

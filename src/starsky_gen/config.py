@@ -35,6 +35,7 @@ class ProjectionMode(str, Enum):
 class OutputFormat(str, Enum):
     png = "png"
     jpg = "jpg"
+    webp = "webp"
 
 
 class RenderProfile(str, Enum):
@@ -43,27 +44,153 @@ class RenderProfile(str, Enum):
   full = "full"
 
 
+class LookTarget(str, Enum):
+    """Primary visual product intent."""
+
+    cinematic = "cinematic"
+    documentary = "documentary"
+
+
+# Locked AAA skybox recipe (wrap-safe vista: bloom/tone up, grain/sensor theater down).
+_CINEMATIC_LOOK_UPDATE: dict[str, object] = {
+    "long_exposure_look": False,
+    "long_exposure_star_trails": False,
+    "galaxy_tone_curve": "filmic",
+    "filmic_shoulder": 0.92,
+    "filmic_s_curve_strength": 0.24,
+    "final_acescct_rolloff": 0.26,
+    "acescct_grade_strength": 0.55,
+    "display_bloom_strength": 0.112,
+    "bloom_threshold": 0.84,
+    "bloom_mix_tight": 0.58,
+    "bloom_mix_mid": 0.34,
+    "bloom_mix_wide": 0.08,
+    "halation_strength": 0.042,
+    "film_grain_strength": 0.0,
+    "blue_noise_dither_strength": 0.08,
+    "nebula_fine_noise_mix": 0.42,
+    "isp_chain_strength": 0.18,
+    "chromatic_aberration_strength": 0.28,
+    "lens_flare_thin_film_strength": 0.026,
+    "sensor_noise_stage": "off",
+    "vignette_strength": 0.28,
+    "local_contrast_strength": 0.16,
+    "split_toning_strength": 0.042,
+    "neutral_wb_strength": 0.24,
+    "nebula_haze_strength": 0.14,
+    "morphology_nebula_haze_scale": 0.12,
+    "structure_type_competition": 0.58,
+    # Midplane glow allowed: protect/dropout softer than sandwich-only pass.
+    "lane_star_dropout_boost": 0.55,
+    "lane_star_dropout_power": 1.15,
+    "post_star_lane_protect_strength": 0.48,
+    "dark_rift_strength": 0.78,
+    "dark_rift_coverage": 0.16,
+    "star_layer_bloom_strength": 0.14,
+    "star_reddening_strength": 1.05,
+    "unresolved_spectral_warmth": 0.55,
+    "background_star_density_scale": 0.30,
+    "plane_star_gate_power": 2.45,
+    "cosmic_star_density_scale": 1.0,
+    "halo_star_density_scale": 0.85,
+    "cosmic_anchor_count": 2,
+    "background_texture_strength": 0.08,
+    "shadow_lift": 0.020,
+    "star_psf_bloom_scale": 1.18,
+    "band_lat_sigma": 0.105,
+    "spike_max_count": 10,
+    "hero_star_count": 6,
+    "hero_lens_ghost_strength": 0.055,
+    "reference_anchors": False,
+    "band_curvature_amp": 0.088,
+    "volumetric_scatter_strength": 0.42,
+    "galactic_band_color_grade_strength": 0.72,
+    "galactic_band_gas_fluff_strength": 0.55,
+    "galactic_band_micro_display_strength": 0.62,
+    "galactic_band_dust_black_strength": 0.88,
+}
+
+
+# Parked photo / long-exposure stack (opt-in via look_target=documentary).
+_DOCUMENTARY_LOOK_UPDATE: dict[str, object] = {
+    "long_exposure_look": True,
+    "long_exposure_star_trails": True,
+    "galaxy_tone_curve": "asinh",
+    "filmic_shoulder": 0.85,
+    "filmic_s_curve_strength": 0.12,
+    "final_acescct_rolloff": 0.14,
+    "acescct_grade_strength": 0.62,
+    "display_bloom_strength": 0.034,
+    "bloom_threshold": 0.94,
+    "bloom_mix_tight": 0.52,
+    "bloom_mix_mid": 0.22,
+    "bloom_mix_wide": 0.06,
+    "halation_strength": 0.024,
+    "film_grain_strength": 0.04,
+    "isp_chain_strength": 0.52,
+    "chromatic_aberration_strength": 0.62,
+    "lens_flare_thin_film_strength": 0.034,
+    "sensor_noise_stage": "both",
+    "vignette_strength": 1.0,
+    "local_contrast_strength": 0.14,
+    "split_toning_strength": 0.032,
+    "neutral_wb_strength": 0.30,
+    "nebula_haze_strength": 0.62,
+    "morphology_nebula_haze_scale": 0.52,
+    "structure_type_competition": 0.0,
+    "lane_star_dropout_boost": 0.0,
+    "post_star_lane_protect_strength": 0.0,
+    "dark_rift_strength": 0.0,
+    "star_layer_bloom_strength": 0.0,
+    "star_psf_bloom_scale": 0.42,
+    "galactic_band_color_grade_strength": 0.74,
+}
+
+
 class FeatureConfig(BaseModel):
     stars: bool = True
     depth: bool = True
     nebula: bool = True
     galaxy_view: bool = True
+    look_target: LookTarget = Field(
+        LookTarget.cinematic,
+        description=(
+            "cinematic=AAA wrap-safe skybox vista (default); "
+            "documentary=parked photo/long-exposure look for later."
+        ),
+    )
     reference_anchors: bool = Field(
-        True,
+        False,
         description="Paint a small set of bright real stars at approximate Galactic (l,b) positions.",
+    )
+    hero_star_enabled: bool = Field(
+        True,
+        description="Promote a few bright galactic heroes with spikes and lens ghosts.",
+    )
+    hero_star_count: int = Field(
+        6,
+        ge=0,
+        le=16,
+        description="Number of procedural hero stars along the galactic band.",
+    )
+    hero_lens_ghost_strength: float = Field(
+        0.055,
+        ge=0.0,
+        le=0.25,
+        description="Per-hero lens ghost / flare stamp amplitude (display).",
     )
     background_gradient: bool = True
     black_background: bool = False
     jpeg_artifact_pass: bool = False
     long_exposure_look: bool = Field(
-        True,
+        False,
         description=(
             "Asymmetric stacked-Milky-Way look: tilted sky floor, mild corner glow, off-center vignette "
-            "(disable for a cleaner symmetric grade)."
+            "(disable for wrap-safe symmetric skyboxes; documentary look enables by default)."
         ),
     )
     long_exposure_star_trails: bool = Field(
-        True,
+        False,
         description="Integrate star PSF over subframes (trails) when long_exposure_look; avoids post-blur.",
     )
     long_exposure_subframes: int = Field(
@@ -94,7 +221,7 @@ class FeatureConfig(BaseModel):
         ),
     )
     unresolved_spectral_warmth: float = Field(
-        0.58,
+        0.82,
         ge=0.0,
         le=1.0,
         description="Tint unresolved speckle/continuum toward disk star chroma (0=neutral blue-white).",
@@ -151,6 +278,69 @@ class FeatureConfig(BaseModel):
         ge=1.0,
         le=3.5,
         description="Widen band host latitude so structure survives above/below the plane.",
+    )
+    structure_architecture_strength: float = Field(
+        1.12,
+        ge=0.0,
+        le=1.35,
+        description="Master drive for puff/vertical/reinject architecture weights through the band.",
+    )
+    structure_band_core_drive: float = Field(
+        0.68,
+        ge=0.22,
+        le=0.82,
+        description="Minimum turbulent-architecture weight inside the band core (not only rims).",
+    )
+    structure_inner_dust_lane_strength: float = Field(
+        0.88,
+        ge=0.0,
+        le=1.25,
+        description="Inner dust sub-band (dark lane) inside the galactic band — Milky-Way sandwich.",
+    )
+    structure_type_competition: float = Field(
+        0.55,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Softmax sharpening across architecture type channels (0=blend, 1=winner-take-most). "
+            "Higher = clearer dust-lane vs puff-shell separation."
+        ),
+    )
+    lane_star_dropout_boost: float = Field(
+        0.55,
+        ge=0.0,
+        le=1.0,
+        description="Extra resolved-star dropout inside architecture dust lane (shell carpet stays).",
+    )
+    lane_star_dropout_power: float = Field(
+        1.15,
+        ge=0.5,
+        le=2.2,
+        description="Power on (1-transmission) for lane-gated resolve weight.",
+    )
+    post_star_lane_protect_strength: float = Field(
+        0.48,
+        ge=0.0,
+        le=1.35,
+        description="Re-darken dust lane after star composite (soft when midplane glow is allowed).",
+    )
+    dark_rift_strength: float = Field(
+        0.78,
+        ge=0.0,
+        le=1.35,
+        description="Sparse high-contrast extinction rifts along the plane (longitude-biased).",
+    )
+    dark_rift_coverage: float = Field(
+        0.16,
+        ge=0.02,
+        le=0.35,
+        description="Fraction of band eligible for dark rift trenches.",
+    )
+    star_layer_bloom_strength: float = Field(
+        0.12,
+        ge=0.0,
+        le=0.35,
+        description="Tri-scale bloom on split-star display layer (hero punch; 0=off).",
     )
     longitude_asymmetry_strength: float = Field(
         0.88,
@@ -273,25 +463,25 @@ class FeatureConfig(BaseModel):
         description="Asymmetric voids/gouges in the band (higher = nastier dark cuts, less smooth strip).",
     )
     extinction_void_floor: float = Field(
-        0.001,
+        0.095,
         ge=0.0005,
-        le=0.12,
-        description="Transmission floor in deepest lanes (galaxy can nearly vanish).",
+        le=0.18,
+        description="Transmission floor in deepest lanes (higher = lighter lanes, more visible structure).",
     )
     extinction_opacity_gamma: float = Field(
-        1.42,
+        1.12,
         ge=1.0,
         le=2.6,
         description="Opacity^γ before extinction (γ>1): preserve weak dust, deepen lanes.",
     )
     extinction_filament_strength: float = Field(
-        1.44,
+        1.02,
         ge=0.0,
         le=1.5,
         description="Filament erosion absorption vs soft cloud (1=fractured rivers, 0=legacy only).",
     )
     extinction_fine_texture_strength: float = Field(
-        0.82,
+        0.52,
         ge=0.0,
         le=1.0,
         description="Fine (~1–5 px) dust extinction carved on top of macro lanes.",
@@ -303,7 +493,7 @@ class FeatureConfig(BaseModel):
         description="Exponent on clear-sightline mask for emission/haze (higher = darker lanes).",
     )
     nebula_haze_strength: float = Field(
-        0.62,
+        0.14,
         ge=0.0,
         le=2.0,
         description="Scale gold haze / band cloud / disk glow additives.",
@@ -333,13 +523,20 @@ class FeatureConfig(BaseModel):
         description="Display-space luma cap in the galactic plane after stars/H II composite.",
     )
     band_star_plane_scale: float = Field(
-        0.62,
+        0.78,
         ge=0.12,
         le=1.0,
         description="Star layer brightness in the bright plane (lower lets nebula dominate).",
     )
+    milky_way_recognition_preset: bool = Field(
+        True,
+        description=(
+            "When galaxy_streak: apply Milky-Way legibility tuning (lane, stars, fluff, "
+            "less brown wash). Disable to use only the scalar defaults below."
+        ),
+    )
     band_ism_dominance: float = Field(
-        0.42,
+        0.58,
         ge=0.0,
         le=2.0,
         description=(
@@ -348,7 +545,7 @@ class FeatureConfig(BaseModel):
         ),
     )
     band_dark_patch_strength: float = Field(
-        0.48,
+        0.62,
         ge=0.0,
         le=1.2,
         description="Carve dark dust patches / voids into the luminous band after ISM lift.",
@@ -361,31 +558,37 @@ class FeatureConfig(BaseModel):
         ),
     )
     galactic_band_color_grade_strength: float = Field(
-        0.88,
+        0.58,
         ge=0.0,
         le=1.2,
         description="Strength of the final galactic band color grade on diffuse/plane pixels.",
     )
+    galactic_band_color_inner_bias: float = Field(
+        0.82,
+        ge=0.0,
+        le=1.2,
+        description="Inner-lane weight in final band color grade (higher = stronger dust sub-band).",
+    )
     galactic_band_dust_black_strength: float = Field(
-        1.12,
+        0.95,
         ge=0.0,
         le=1.5,
         description="Turbulent near-black dust carve in the final band color grade.",
     )
     galactic_band_gas_fluff_strength: float = Field(
-        0.78,
+        1.05,
         ge=0.0,
         le=1.3,
         description="Puffy cleared pockets and micro contrast in the final band color grade.",
     )
     galactic_band_micro_display_strength: float = Field(
-        1.32,
+        1.12,
         ge=0.0,
         le=1.5,
         description="Final display sculpt of pixel-scale gas filaments and cloud fluff.",
     )
     galactic_band_separation_strength: float = Field(
-        1.12,
+        1.22,
         ge=0.0,
         le=1.6,
         description="Local contrast expansion — gaps between clouds, lanes, and cleared pockets.",
@@ -401,7 +604,7 @@ class FeatureConfig(BaseModel):
         description="Apply lens vignette in linear space before scene tone map.",
     )
     star_psf_bloom_scale: float = Field(
-        0.42,
+        1.08,
         ge=0.0,
         le=1.5,
         description="Scale tight sensor bloom on bright stars only.",
@@ -452,7 +655,7 @@ class FeatureConfig(BaseModel):
         ),
     )
     mag_bright_lim: float = Field(
-        8.0,
+        7.2,
         ge=-2.0,
         le=14.0,
         description="Bright end of procedural apparent-magnitude range (lower m → brighter stars).",
@@ -469,15 +672,30 @@ class FeatureConfig(BaseModel):
         le=8.0,
         description="Multiplier on resolved background/mid star catalog count in galaxy_view.",
     )
+    background_star_density_scale: float = Field(
+        0.30,
+        ge=0.05,
+        le=2.0,
+        description=(
+            "Off-plane / cosmic+halo density dial (cinematic ~0.30 ≈ 70% cut). "
+            "Multiplies cosmic and halo catalogs and sky unresolved grain."
+        ),
+    )
+    plane_star_gate_power: float = Field(
+        2.35,
+        ge=1.0,
+        le=4.5,
+        description="Power on disk_weight when culling high-latitude galactic stars (higher = tighter plane).",
+    )
     cosmic_star_enabled: bool = Field(
         True,
         description="Population A: isotropic background field (independent of galactic morphology).",
     )
     cosmic_star_density_scale: float = Field(
         1.0,
-        ge=0.2,
+        ge=0.05,
         le=2.5,
-        description="Density scale for isotropic cosmic background stars.",
+        description="Density scale for isotropic cosmic background stars (× background_star_density_scale).",
     )
     halo_star_enabled: bool = Field(
         True,
@@ -510,13 +728,13 @@ class FeatureConfig(BaseModel):
         description="Rare bright anchor stars in the isotropic cosmic field.",
     )
     galactic_anchor_star_count: int = Field(
-        28,
+        32,
         ge=0,
         le=32,
         description="Max ultra-bright outliers in morphology-linked galactic catalogs.",
     )
     galactic_overdensity_star_count: int = Field(
-        420,
+        720,
         ge=0,
         le=4000,
         description="Extra resolved stars placed on morphology density peaks.",
@@ -645,7 +863,7 @@ class FeatureConfig(BaseModel):
         description="dN/dm power-law slope blended with IMF apparent magnitudes.",
     )
     star_reddening_strength: float = Field(
-        1.0,
+        1.38,
         ge=0.0,
         le=2.5,
         description="Scale for per-star dust reddening before PSF stamp (0=off).",
@@ -663,8 +881,8 @@ class FeatureConfig(BaseModel):
         description="Multiscale contrast on dark dust lanes after nebula composite.",
     )
     galaxy_tone_curve: Literal["reinhard", "asinh", "filmic", "aces", "acescct"] = Field(
-        "asinh",
-        description="HDR roll-off toward display for galaxy_view.",
+        "filmic",
+        description="HDR roll-off toward display for galaxy_view (filmic default for cinematic skyboxes).",
     )
     asinh_stretch_gain: float = Field(
         0.045,
@@ -697,7 +915,7 @@ class FeatureConfig(BaseModel):
         description="Shadow toe softness after asinh (higher = lifted blacks).",
     )
     acescct_grade_strength: float = Field(
-        0.62,
+        0.55,
         ge=0.0,
         le=1.2,
         description="ACEScct log-grade strength when galaxy_tone_curve=acescct.",
@@ -709,19 +927,19 @@ class FeatureConfig(BaseModel):
         description="Shoulder compression in ACEScct rolloff passes.",
     )
     final_acescct_rolloff: float = Field(
-        0.14,
+        0.28,
         ge=0.0,
         le=1.0,
         description="Optional ACEScct cinematic pass after display grade (0=off).",
     )
     isp_chain_strength: float = Field(
-        0.52,
+        0.22,
         ge=0.0,
         le=1.5,
         description="ISP after linear noise on nebula canvas (0=off; lower preserves star chroma when split).",
     )
     lens_flare_thin_film_strength: float = Field(
-        0.034,
+        0.022,
         ge=0.0,
         le=0.12,
         description="Thin-film interference tint on lens flare / hot cores.",
@@ -733,7 +951,7 @@ class FeatureConfig(BaseModel):
         description="Post-JPEG low-pass on small-scale highlights (anti-blocking).",
     )
     filmic_shoulder: float = Field(
-        0.85,
+        0.92,
         ge=0.1,
         le=4.0,
         description="Shoulder strength for galaxy_tone_curve=filmic.",
@@ -757,7 +975,7 @@ class FeatureConfig(BaseModel):
         description="Only pixels with linear luma below this knee pick up faint unsharp (post disk-weighted gamma).",
     )
     sensor_noise_stage: Literal["off", "linear", "display", "both"] = Field(
-        "both",
+        "off",
         description="Poisson/read noise: linear=pre tone-map; display=post tone-map camera pipeline.",
     )
     sensor_shot_noise_scale: float = Field(
@@ -785,13 +1003,13 @@ class FeatureConfig(BaseModel):
         description="Read-noise sigma after tone map.",
     )
     halation_strength: float = Field(
-        0.024,
+        0.036,
         ge=0.0,
         le=0.2,
         description="Wavelength-dependent halation on saturated nebula / bright disk.",
     )
     chromatic_aberration_strength: float = Field(
-        0.62,
+        0.18,
         ge=0.0,
         le=2.5,
         description="Mild lateral chromatic aberration toward edges (bright cores).",
@@ -815,7 +1033,7 @@ class FeatureConfig(BaseModel):
         description="Weight of fine FBM in galaxy nebula stack (lower = less speckle).",
     )
     disk_star_density_dropout: float = Field(
-        0.38,
+        0.32,
         ge=0.0,
         le=0.62,
         description="Prob. to skip bg/mid stars in bright disk (scaled by disk_w; fg unchanged).",
@@ -827,31 +1045,31 @@ class FeatureConfig(BaseModel):
         description="Per-star flux multiplier scatter: 1 + N(0, σ) for photoreal catalog.",
     )
     faint_star_chroma_desat: float = Field(
-        0.09,
+        0.0,
         ge=0.0,
         le=0.28,
         description="Desaturate faint star display chroma so the band reads as integrated light.",
     )
     star_composite_add_scale: float = Field(
-        0.92,
+        0.96,
         ge=0.5,
         le=1.0,
         description="Scale star layer before add+max onto graded canvas (lower avoids blowing disk).",
     )
     star_band_chroma_desat: float = Field(
-        0.06,
+        0.0,
         ge=0.0,
         le=0.45,
         description="Extra chroma desat for stars on the bright galactic plane (integrated light).",
     )
     star_band_brightness_scale: float = Field(
-        0.88,
+        1.0,
         ge=0.35,
         le=1.0,
         description="Star brightness multiplier on the bright plane (lower = less blue fringe).",
     )
     star_band_chroma_adapt: float = Field(
-        0.12,
+        0.0,
         ge=0.0,
         le=0.65,
         description="Pull star chroma toward local graded canvas in the plane (combination fix).",
@@ -929,43 +1147,43 @@ class FeatureConfig(BaseModel):
         description="If true, also blur nebula canvas (often smears emission into noise).",
     )
     filmic_s_curve_strength: float = Field(
-        0.12,
+        0.28,
         ge=0.0,
         le=0.6,
         description="Mild global S-curve in display finish only (core depth uses localized dodge/burn).",
     )
     split_toning_strength: float = Field(
-        0.032,
+        0.028,
         ge=0.0,
         le=0.5,
         description="Subtle warm highlights / cool shadows (display finish).",
     )
     neutral_wb_strength: float = Field(
-        0.30,
+        0.26,
         ge=0.0,
         le=1.0,
         description="Gray-world white balance toward neutral before split-tone.",
     )
     local_contrast_strength: float = Field(
-        0.14,
+        0.18,
         ge=0.0,
         le=0.35,
         description="Modest CLAHE-like local contrast (0=off).",
     )
     display_bloom_strength: float = Field(
-        0.034,
+        0.095,
         ge=0.0,
         le=0.5,
         description="Three-scale thresholded bloom on bright disk (nebula canvas when split_star_display_grade).",
     )
     bloom_threshold: float = Field(
-        0.94,
+        0.86,
         ge=0.5,
         le=0.99,
         description="Display-luma threshold for bloom (higher = tighter hot core only).",
     )
-    bloom_mix_tight: float = Field(0.52, ge=0.0, le=1.0)
-    bloom_mix_mid: float = Field(0.22, ge=0.0, le=1.0)
+    bloom_mix_tight: float = Field(0.62, ge=0.0, le=1.0)
+    bloom_mix_mid: float = Field(0.30, ge=0.0, le=1.0)
     bloom_mix_wide: float = Field(0.06, ge=0.0, le=1.0)
     god_rays_strength: float = Field(0.0, ge=0.0, le=0.4)
     core_burn_strength: float = Field(0.10, ge=0.0, le=0.5)
@@ -1007,7 +1225,7 @@ class FeatureConfig(BaseModel):
         le=0.4,
         description="Warm core / cool halo color gradient (stars + mild canvas).",
     )
-    shadow_lift: float = Field(0.024, ge=0.0, le=0.06)
+    shadow_lift: float = Field(0.016, ge=0.0, le=0.06)
     highlight_chroma_desat: float = Field(
         0.04,
         ge=0.0,
@@ -1095,19 +1313,19 @@ class FeatureConfig(BaseModel):
         description="Local cluster-likelihood ε amplitude (multiplicative on cluster map).",
     )
     morphology_absorption_contrast: float = Field(
-        2.05,
+        1.12,
         ge=0.8,
         le=2.2,
         description="Percentile contrast on morphology dust absorption (higher = nastier lane mask).",
     )
     morphology_extinction_strength: float = Field(
-        2.15,
+        1.02,
         ge=0.6,
         le=2.5,
         description="Scale morphology absorption before transmission (cloud dominance).",
     )
     morphology_extinction_av_scale: float = Field(
-        1.38,
+        0.88,
         ge=0.8,
         le=2.5,
         description="Extra A_V on canvas when applying morphology extinction to unresolved light.",
@@ -1119,7 +1337,7 @@ class FeatureConfig(BaseModel):
         description="Reduce dust backlight/rim/mottle fill after extinction (0=full legacy fill).",
     )
     morphology_nebula_haze_scale: float = Field(
-        0.52,
+        0.12,
         ge=0.05,
         le=2.0,
         description="Scale nebula haze/glow/band additives when morphology dust is primary.",
@@ -1152,7 +1370,7 @@ class FeatureConfig(BaseModel):
         description="Emission-only extinction gate exponent (gas/haze use a milder mask).",
     )
     morphology_extinction_lane_carve: float = Field(
-        0.88,
+        0.34,
         ge=0.0,
         le=0.95,
         description="Final asymmetric lane carve on morphology extinction map.",
@@ -1164,7 +1382,7 @@ class FeatureConfig(BaseModel):
         description="Roughen filament lanes (edge texture, not multiplicative hole punching).",
     )
     morphology_missing_region_boost: float = Field(
-        0.44,
+        0.18,
         ge=0.0,
         le=0.95,
         description="Second-pass canvas mask in darkest extinction lanes (missing regions).",
@@ -1198,16 +1416,16 @@ class FeatureConfig(BaseModel):
         description="Giant-tail fraction inside association/cluster catalog.",
     )
     vignette_strength: float = Field(
-        1.0,
+        0.35,
         ge=0.0,
         le=2.5,
-        description="Scale long-exposure vignette when galaxy_view.",
+        description="Scale vignette when galaxy_view (keep low for wrap-safe skyboxes).",
     )
     film_grain_strength: float = Field(
-        0.04,
+        0.0,
         ge=0.0,
         le=0.15,
-        description="Blue-noise film grain RMS at display (galaxy_view); 0=off.",
+        description="Blue-noise film grain RMS at display; cinematic default off (use continuum micro only).",
     )
     emission_unsharp_amount: float = Field(
         0.14,
@@ -1226,18 +1444,23 @@ class FeatureConfig(BaseModel):
         le=0.65,
         description="Weak PSF radius ∝ flux^gamma (brightness mostly flux, not footprint).",
     )
-    m_bloom_cut: float = Field(7.8, ge=5.0, le=14.0, description="Stars brighter than this get bloom layer.")
-    spike_max_count: int = Field(4, ge=0, le=64)
+    m_bloom_cut: float = Field(
+        8.8,
+        ge=5.0,
+        le=14.0,
+        description="Stars brighter than this magnitude get bloom layer (higher = more heroes bloom).",
+    )
+    spike_max_count: int = Field(10, ge=0, le=64)
     band_lat_sigma: float = Field(0.135, ge=0.04, le=0.22)
     band_rotation_deg: float = Field(2.5, ge=-12.0, le=12.0)
     band_curvature_amp: float = Field(
-        0.078,
+        0.088,
         ge=0.0,
         le=0.14,
         description="S/U/W midplane warp amplitude (longitude sine family).",
     )
     band_thickness_asymmetry: float = Field(
-        0.42,
+        0.58,
         ge=0.0,
         le=0.72,
         description="How much thinner vs thicker above/below the warped midplane (seed-locked).",
@@ -1346,6 +1569,14 @@ class RenderConfig(BaseModel):
     )
     cubemap_face_size: int = Field(1024, ge=128, le=4096)
     wrap_safe: Literal[True] = True
+    image_copyright: str | None = Field(
+        None,
+        description="Copyright notice embedded in output PNG/JPEG metadata (local .license).",
+    )
+    image_license: str | None = Field(
+        None,
+        description="Distribution / license notice embedded in PNG License metadata (local .license).",
+    )
 
     @field_validator("output_base_name")
     @classmethod
@@ -1354,3 +1585,129 @@ class RenderConfig(BaseModel):
         if not cleaned:
             raise ValueError("output_base_name cannot be empty")
         return cleaned
+
+
+def apply_look_target_preset(cfg: RenderConfig) -> RenderConfig:
+    """Remap display/look scalars for ``features.look_target``.
+
+    Cinematic is the AAA wrap-safe skybox recipe. Documentary restores the parked
+    photo/long-exposure stack. Explicit ``long_exposure_look=True`` under cinematic
+    is preserved (CLI override); documentary always enables the long-exposure path.
+    """
+    f = cfg.features
+    if f.look_target == LookTarget.documentary:
+        update = dict(_DOCUMENTARY_LOOK_UPDATE)
+    else:
+        update = dict(_CINEMATIC_LOOK_UPDATE)
+        if f.long_exposure_look:
+            update.pop("long_exposure_look", None)
+            update.pop("long_exposure_star_trails", None)
+    tuned = f.model_copy(update=update)
+    return cfg.model_copy(update={"features": tuned})
+
+
+def apply_milky_way_recognition_preset(cfg: RenderConfig) -> RenderConfig:
+    """Apply Milky-Way 3-second-read tuning on top of ``cfg.features`` scalars.
+
+    Cinematic vista: reinforce dust-lane/puff sandwich and allow darker lanes.
+    Documentary: keep milder color-grade caps to reduce photo brown wash.
+    """
+    if not cfg.features.milky_way_recognition_preset or cfg.nebula_mode != NebulaMode.galaxy_streak:
+        return cfg
+    f = cfg.features
+    cinematic = f.look_target == LookTarget.cinematic
+    if cinematic:
+        update = {
+            "band_ism_dominance": min(max(f.band_ism_dominance, 0.48), 0.58),
+            "band_nebula_radiance_scale": min(f.band_nebula_radiance_scale, 0.88),
+            "band_dark_patch_strength": min(max(f.band_dark_patch_strength, 0.55), 0.72),
+            "galactic_band_gas_fluff_strength": min(max(f.galactic_band_gas_fluff_strength, 0.42), 0.62),
+            "galactic_band_micro_display_strength": min(
+                max(f.galactic_band_micro_display_strength, 0.48), 0.68
+            ),
+            "galactic_band_separation_strength": max(f.galactic_band_separation_strength, 1.18),
+            "structure_architecture_strength": max(f.structure_architecture_strength, 1.12),
+            "structure_band_core_drive": max(f.structure_band_core_drive, 0.68),
+            "structure_inner_dust_lane_strength": min(
+                max(f.structure_inner_dust_lane_strength, 0.85), 0.98
+            ),
+            "structure_type_competition": max(f.structure_type_competition, 0.55),
+            # Glow-allowed cinematic: soft sandwich floors (not mid-crushing).
+            "lane_star_dropout_boost": max(f.lane_star_dropout_boost, 0.55),
+            "lane_star_dropout_power": max(f.lane_star_dropout_power, 1.15),
+            "post_star_lane_protect_strength": max(f.post_star_lane_protect_strength, 0.48),
+            "dark_rift_strength": max(f.dark_rift_strength, 0.75),
+            "dark_rift_coverage": max(f.dark_rift_coverage, 0.15),
+            "star_layer_bloom_strength": max(f.star_layer_bloom_strength, 0.10),
+            "star_psf_bloom_scale": max(f.star_psf_bloom_scale, 1.0),
+            "star_reddening_strength": min(max(f.star_reddening_strength, 0.90), 1.12),
+            "unresolved_spectral_warmth": max(f.unresolved_spectral_warmth, 0.55),
+            # Photogenic: do not floor cosmic density high — sparse voids win.
+            "cosmic_star_density_scale": min(f.cosmic_star_density_scale, 1.05),
+            "background_star_density_scale": min(f.background_star_density_scale, 0.35),
+            "shadow_lift": min(max(f.shadow_lift, 0.016), 0.024),
+            "band_curvature_amp": max(f.band_curvature_amp, 0.08),
+            "volumetric_scatter_strength": max(f.volumetric_scatter_strength, 0.40),
+            "nebula_haze_strength": min(f.nebula_haze_strength, 0.16),
+            "morphology_nebula_haze_scale": min(f.morphology_nebula_haze_scale, 0.14),
+            "disk_star_density_dropout": min(f.disk_star_density_dropout, 0.28),
+            "morphology_extinction_lane_carve": min(max(f.morphology_extinction_lane_carve, 0.22), 0.38),
+            "morphology_dust_primary": True,
+            "split_star_display_grade": True,
+            "extinction_void_floor": max(f.extinction_void_floor, 0.075),
+            "galactic_band_dust_black_strength": min(
+                max(f.galactic_band_dust_black_strength, 0.75), 1.05
+            ),
+            "galactic_band_color_grade_strength": (
+                min(max(f.galactic_band_color_grade_strength, 0.50), 0.62)
+                if f.galactic_band_color_grade
+                else f.galactic_band_color_grade_strength
+            ),
+            "band_display_peak_cap": min(f.band_display_peak_cap, 0.76),
+            "morphology_absorption_contrast": min(f.morphology_absorption_contrast, 1.22),
+            "morphology_extinction_strength": min(f.morphology_extinction_strength, 1.15),
+            "morphology_extinction_av_scale": min(f.morphology_extinction_av_scale, 0.92),
+            "morphology_missing_region_boost": min(f.morphology_missing_region_boost, 0.22),
+            "extinction_filament_strength": min(f.extinction_filament_strength, 1.08),
+            "extinction_fine_texture_strength": min(f.extinction_fine_texture_strength, 0.28),
+            "galactic_band_color_inner_bias": max(f.galactic_band_color_inner_bias, 0.78),
+        }
+    else:
+        update = {
+            "band_ism_dominance": min(max(f.band_ism_dominance, 0.52), 0.58),
+            "band_nebula_radiance_scale": min(f.band_nebula_radiance_scale, 0.82),
+            "band_dark_patch_strength": min(f.band_dark_patch_strength, 0.38),
+            "galactic_band_gas_fluff_strength": max(f.galactic_band_gas_fluff_strength, 0.92),
+            "galactic_band_separation_strength": max(f.galactic_band_separation_strength, 1.08),
+            "structure_architecture_strength": max(f.structure_architecture_strength, 1.05),
+            "structure_band_core_drive": max(f.structure_band_core_drive, 0.58),
+            "structure_inner_dust_lane_strength": min(
+                max(f.structure_inner_dust_lane_strength, 0.62), 0.78
+            ),
+            "disk_star_density_dropout": min(f.disk_star_density_dropout, 0.34),
+            "morphology_extinction_lane_carve": min(f.morphology_extinction_lane_carve, 0.22),
+            "morphology_dust_primary": True,
+            "split_star_display_grade": True,
+            "extinction_void_floor": max(f.extinction_void_floor, 0.085),
+            "galactic_band_dust_black_strength": min(f.galactic_band_dust_black_strength, 0.38),
+            "galactic_band_color_grade_strength": (
+                min(f.galactic_band_color_grade_strength, 0.52)
+                if f.galactic_band_color_grade
+                else f.galactic_band_color_grade_strength
+            ),
+            "band_display_peak_cap": min(f.band_display_peak_cap, 0.76),
+            "morphology_absorption_contrast": min(f.morphology_absorption_contrast, 1.22),
+            "morphology_extinction_strength": min(f.morphology_extinction_strength, 1.15),
+            "morphology_extinction_av_scale": min(f.morphology_extinction_av_scale, 0.92),
+            "morphology_missing_region_boost": min(f.morphology_missing_region_boost, 0.22),
+            "extinction_filament_strength": min(f.extinction_filament_strength, 1.08),
+            "extinction_fine_texture_strength": min(f.extinction_fine_texture_strength, 0.28),
+            "galactic_band_color_inner_bias": max(f.galactic_band_color_inner_bias, 0.72),
+        }
+    tuned = f.model_copy(update=update)
+    return cfg.model_copy(update={"features": tuned})
+
+
+def finalize_render_config(cfg: RenderConfig) -> RenderConfig:
+    """Apply look-target then Milky-Way recognition presets before render."""
+    return apply_milky_way_recognition_preset(apply_look_target_preset(cfg))

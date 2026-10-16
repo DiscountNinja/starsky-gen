@@ -16,8 +16,12 @@ Morphology smoothing pipeline (debug layers show puffy/turbulent HF; final rende
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from starsky_gen.structure_envelope import StructureArchitectureWeights
 
 from starsky_gen.dust_field import (
     build_band_disruption_field,
@@ -131,6 +135,7 @@ class GalacticMorphology:
     psf_environment: np.ndarray
     disk_weight: np.ndarray
     unresolved_accum: np.ndarray = field(repr=False)
+    structure_architecture: StructureArchitectureWeights | None = None
     disk_thickness_modulation: np.ndarray | None = None
     extinction_maps: MorphologyExtinctionMaps | None = None
 
@@ -216,6 +221,31 @@ class GalacticMorphology:
             "brutal_erasure_mask": self.brutal_erasure_mask,
             "structure_survival": self.structure_survival,
             "vertical_extent": self.vertical_extent,
+            "turbulence_architecture": (
+                self.structure_architecture.turbulence_drive
+                if self.structure_architecture is not None
+                else np.zeros_like(self.disk_weight)
+            ),
+            "architecture_puff_weight": (
+                self.structure_architecture.puff_weight
+                if self.structure_architecture is not None
+                else np.zeros_like(self.disk_weight)
+            ),
+            "architecture_reinject_weight": (
+                self.structure_architecture.reinject_weight
+                if self.structure_architecture is not None
+                else np.zeros_like(self.disk_weight)
+            ),
+            "architecture_dust_lane": (
+                self.structure_architecture.dust_lane_weight
+                if self.structure_architecture is not None
+                else np.zeros_like(self.disk_weight)
+            ),
+            "architecture_negative_space": (
+                self.structure_architecture.negative_space_weight
+                if self.structure_architecture is not None
+                else np.zeros_like(self.disk_weight)
+            ),
             "lon_asymmetry": self.lon_asymmetry,
             "gold_population_weight": self.gold_population_weight,
             "psf_environment": self.psf_environment,
@@ -334,7 +364,7 @@ def build_galactic_morphology(
     band_lat_sigma: float = 0.10,
     band_rotation_deg: float = 2.5,
     band_curvature_amp: float = 0.04,
-    band_thickness_asymmetry: float = 0.38,
+    band_thickness_asymmetry: float = 0.48,
     disk_mesoscale_thickness_strength: float = 0.58,
     cluster_strength: float = 0.72,
     turbulence_strength: float = 0.85,
@@ -356,6 +386,12 @@ def build_galactic_morphology(
     generation_phase: float = 0.0,
     vertical_extent_strength: float = 0.72,
     structure_host_latitude_scale: float = 1.85,
+    structure_architecture_strength: float = 1.0,
+    structure_band_core_drive: float = 0.52,
+    structure_inner_dust_lane_strength: float = 0.68,
+    structure_type_competition: float = 0.0,
+    lane_star_dropout_boost: float = 0.0,
+    lane_star_dropout_power: float = 1.1,
     longitude_asymmetry_strength: float = 0.88,
     brutal_erasure_strength: float = 0.78,
     seam_guard_strength: float = 0.85,
@@ -448,16 +484,35 @@ def build_galactic_morphology(
         band_w_pre,
         rng,
         band_lat_sigma=band_lat_sigma,
-        jitter_strength=0.92,
+        jitter_strength=0.56,
         band_curvature_amp=band_curvature_amp,
         thickness_asymmetry=band_thickness_asymmetry,
         mesoscale_strength=disk_mesoscale_thickness_strength,
         periodic_x=periodic_x,
     )
 
-    ridge_dark = np.clip(1.0 - np.abs(latent_ridge * 2.0 - 1.0), 0.0, 1.0) ** 1.35
-    scar = np.clip(ridge_dark**1.2 * float(scar_strength), 0.0, 1.0)
-    dust_a = np.clip(0.06 + 0.78 * scar + 0.38 * (1.0 - g), 0.05, 1.0)
+    from starsky_gen.structure_envelope import build_fine_puff_field
+
+    puff_rng = np.random.default_rng(int(rng.integers(0, 2**31 - 1)) ^ 0xC10D05)
+    puff_field = build_fine_puff_field(
+        puff_rng, height, width, periodic_x=periodic_x, strength=1.0, center_boost=0.55
+    )
+    ridge_dark = np.clip(1.0 - np.abs(latent_ridge * 2.0 - 1.0), 0.0, 1.0) ** 1.12
+    scar = np.clip(ridge_dark**1.05 * float(scar_strength), 0.0, 1.0)
+    from starsky_gen.procedural_noise import gaussian_blur_pil
+
+    scale_pre = float(max(height, width))
+    puff_soft = gaussian_blur_pil(
+        puff_field,
+        float(np.clip(scale_pre * 0.011, 1.0, 9.0)),
+        periodic_x=periodic_x,
+    )
+    puff_lane = puff_soft * np.clip(band_w_pre**0.88, 0.0, 1.0)
+    dust_a = np.clip(
+        0.06 + 0.38 * scar + 0.24 * (1.0 - g) + 0.20 * puff_lane,
+        0.05,
+        1.0,
+    )
     lo_a = float(np.percentile(dust_a, 4.0))
     hi_a = float(np.percentile(dust_a, 90.0))
     if hi_a > lo_a + 1e-8:
@@ -512,7 +567,9 @@ def build_galactic_morphology(
             cap = float(np.percentile(sub, 84.0))
             if cap > 0.18:
                 dust_a = dust_a.copy()
-                dust_a[band_core] = np.clip(sub * (0.62 / cap), 0.08, 0.68)
+                scaled = np.clip(sub * (0.74 / cap), 0.08, 0.78)
+                lane_seed = sub >= float(np.percentile(sub, 68.0))
+                dust_a[band_core] = np.where(lane_seed, np.maximum(sub, scaled), scaled)
         dust_a = enrich_dust_absorption_microstructure(
             dust_a,
             rng,
@@ -530,21 +587,35 @@ def build_galactic_morphology(
             p_lo=10.0,
             p_hi=84.0,
         )
-    d = transmission_from_absorption_map(dust_a, void_floor=0.06, sharpness=2.88)
+    from starsky_gen.dust_field import apply_cloudy_transmission_breakup
+    from starsky_gen.structure_envelope import inject_band_cloud_puffs
+
+    dust_a = inject_band_cloud_puffs(
+        dust_a, band_w_pre, puff_rng, periodic_x=periodic_x, strength=0.38 * max(micro_s, 0.35)
+    )
+    d = transmission_from_absorption_map(
+        dust_a, void_floor=0.06, sharpness=1.58, opacity_gamma=1.14
+    )
+    d = apply_cloudy_transmission_breakup(
+        d, puff_soft, band_w_pre, strength=0.46, void_floor=0.06, periodic_x=periodic_x
+    )
     if micro_s > 1e-6:
         from starsky_gen.dust_field import _band_host_gate
 
         band_t = _band_host_gate(band_w_pre, (height, width)) > 0.20
         if bool(np.any(band_t)):
             d_soft = transmission_from_absorption_map(
-                dust_a, void_floor=0.08, sharpness=2.05
+                dust_a, void_floor=0.08, sharpness=1.48, opacity_gamma=1.10
+            )
+            d_soft = apply_cloudy_transmission_breakup(
+                d_soft, puff_soft, band_w_pre, strength=0.38, periodic_x=periodic_x
             )
             d = np.where(band_t, np.minimum(d, d_soft), d)
         d = carve_dust_transmission_microstructure(
             d,
             dust_a,
             periodic_x=periodic_x,
-            strength=micro_s,
+            strength=micro_s * 0.58,
             void_floor=0.06,
             band_weight=band_w_pre,
         )
@@ -617,13 +688,17 @@ def build_galactic_morphology(
         cluster_map=None,
     )
     disk_w = np.clip(base_band / (float(np.max(base_band)) + 1e-8), 0.0, 1.0)
-    from starsky_gen.structure_envelope import apply_variable_band_thickness, soften_band_envelope
+    from starsky_gen.structure_envelope import (
+        apply_variable_band_thickness,
+        modulate_disk_weight_longitude,
+        soften_band_envelope,
+    )
 
     disk_w, curve_kind, disk_thickness_mod = apply_variable_band_thickness(
         disk_w,
         rng,
         band_lat_sigma=band_lat_sigma,
-        jitter_strength=0.92,
+        jitter_strength=0.56,
         band_curvature_amp=band_curvature_amp,
         thickness_asymmetry=band_thickness_asymmetry,
         mesoscale_strength=disk_mesoscale_thickness_strength,
@@ -632,7 +707,13 @@ def build_galactic_morphology(
     disk_w = soften_band_envelope(
         disk_w, (height, width), periodic_x=periodic_x, lat_blur_sigma=10.0, power=0.54
     )
-    disk_w = np.clip(disk_w * (0.80 + 0.20 * lon_asym), 0.0, 1.0)
+    disk_w = modulate_disk_weight_longitude(
+        disk_w,
+        lon_asym,
+        rng,
+        periodic_x=periodic_x,
+        strength=float(np.clip(longitude_asymmetry_strength, 0.0, 1.35)),
+    )
     from starsky_gen.structure_envelope import (
         apply_disk_weight_pole_falloff,
         soften_disk_weight_band_rim,
@@ -640,6 +721,12 @@ def build_galactic_morphology(
 
     disk_w = soften_disk_weight_band_rim(disk_w, periodic_x=periodic_x, strength=0.48)
     disk_w = apply_disk_weight_pole_falloff(disk_w, height, sigma=0.36, power=1.24)
+    if max(height, width) >= 256:
+        from starsky_gen.dust_field import attenuate_column_comb
+
+        disk_w = attenuate_column_comb(
+            disk_w, disk_w, strength=0.12, periodic_x=periodic_x
+        )
 
     erosion = build_filament_erosion_map(rng, height, width, periodic_x=periodic_x)
     erosion = np.clip(np.maximum(erosion, scar * 0.72), 0.0, 1.0)
@@ -681,18 +768,6 @@ def build_galactic_morphology(
         periodic_x=periodic_x,
         mesoscale_field=disk_thickness_mod,
     )
-    from starsky_gen.structure_envelope import reinject_vertical_dust_structure
-
-    dust_a = reinject_vertical_dust_structure(
-        dust_a,
-        vertical_extent,
-        structure_survival,
-        latent_turb,
-        latent_ridge_hi,
-        disk_w,
-        periodic_x=periodic_x,
-        strength=float(np.clip(vertical_extent_strength * 1.08, 0.52, 1.22)),
-    )
     from starsky_gen.dust_field import remap_band_absorption_contrast
 
     dust_a = remap_band_absorption_contrast(
@@ -708,6 +783,14 @@ def build_galactic_morphology(
         disk_w,
         erosion,
         strength=brutal_erasure_strength,
+    )
+    # Soft shoulders after threshold so debug/display carving is not binary.
+    _sig_soft = float(np.clip(max(height, width) * 0.008, 1.0, 8.0))
+    obliteration = np.clip(
+        gaussian_blur_pil(obliteration, _sig_soft, periodic_x=periodic_x), 0.0, 1.0
+    )
+    brutal = np.clip(
+        gaussian_blur_pil(brutal, _sig_soft * 0.92, periodic_x=periodic_x), 0.0, 1.0
     )
     gold_pop = build_gold_population_field(
         sf,
@@ -731,7 +814,8 @@ def build_galactic_morphology(
         0.0,
         1.0,
     )
-    dust_a = np.clip(dust_a + lane_hp * 0.18 * bg_fil, 0.06, 0.82)
+    rim_fil = np.clip(bg_fil * (1.0 - disk_w**0.92), 0.0, 1.0)
+    dust_a = np.clip(dust_a + lane_hp * 0.09 * rim_fil, 0.06, 0.82)
     scale_f = float(max(height, width))
     med_sig_f = float(np.clip(scale_f * 0.018, 2.5, 20.0))
     a_med_f = gaussian_blur_pil(dust_a, med_sig_f, periodic_x=periodic_x)
@@ -739,50 +823,91 @@ def build_galactic_morphology(
     dust_a = np.clip(dust_a + a_hp_f * 0.28 * bg_fil, 0.06, 0.80)
     from starsky_gen.dust_field import attenuate_column_comb
 
+    from starsky_gen.dust_field import attenuate_column_comb, apply_cloudy_transmission_breakup
+
     if max(height, width) >= 512:
-        from starsky_gen.dust_field import attenuate_column_comb
-
         dust_a = attenuate_column_comb(
-            dust_a, disk_w, strength=0.10, periodic_x=periodic_x
+            dust_a, disk_w, strength=0.06, periodic_x=periodic_x
         )
-        from starsky_gen.structure_envelope import (
-            build_fine_puff_field,
-            build_structure_morph_host,
-            decouple_dust_from_band_gate,
-            inject_band_cloud_puffs,
-        )
+    from starsky_gen.structure_envelope import (
+        apply_structure_architecture_pipeline,
+        build_structure_architecture_weights,
+    )
 
-        puff_rng = np.random.default_rng(int(rng.integers(0, 2**31 - 1)) ^ 0xC10D05)
-        puff_field = build_fine_puff_field(
-            puff_rng, height, width, periodic_x=periodic_x, strength=1.0, center_boost=1.0
-        )
-        morph_host = build_structure_morph_host(
-            disk_w,
-            vertical_extent,
-            puff_field,
-            periodic_x=periodic_x,
-        )
-        dust_a = decouple_dust_from_band_gate(
-            dust_a, morph_host, disk_w, periodic_x=periodic_x, strength=0.78
-        )
-        if micro_s > 1e-6:
-            dust_a = inject_band_cloud_puffs(
-                dust_a,
-                disk_w,
-                puff_rng,
-                periodic_x=periodic_x,
-                strength=0.58 * micro_s,
-            )
-            dust_a = decouple_dust_from_band_gate(
-                dust_a, morph_host, disk_w, periodic_x=periodic_x, strength=0.62
-            )
-    d = transmission_from_absorption_map(dust_a, void_floor=0.06, sharpness=2.55)
+    puff_field = build_fine_puff_field(
+        puff_rng, height, width, periodic_x=periodic_x, strength=1.0, center_boost=0.55
+    )
+    arch_st = float(np.clip(structure_architecture_strength, 0.0, 1.35))
+    # One LF latitude bend for the whole morphology plane (not a flat equator ruler).
+    from starsky_gen.structure_envelope import apply_low_frequency_band_warp
+
+    _warp_amp = 0.078
+    disk_w = apply_low_frequency_band_warp(disk_w, amplitude=_warp_amp, periodic_x=periodic_x)
+    disk_w = np.clip(disk_w / max(float(np.max(disk_w)), 1e-6), 0.0, 1.0)
+    vertical_extent = apply_low_frequency_band_warp(
+        vertical_extent, amplitude=_warp_amp * 0.85, periodic_x=periodic_x
+    )
+    vertical_extent = np.clip(vertical_extent, 0.0, 1.0)
+    architecture = build_structure_architecture_weights(
+        disk_w,
+        vertical_extent,
+        structure_survival,
+        puff_field,
+        latent_turb,
+        lon_asymmetry=lon_asym,
+        erosion=erosion,
+        fractal_dark=fractal_dark,
+        band_core_drive=structure_band_core_drive,
+        inner_dust_lane_strength=structure_inner_dust_lane_strength,
+        strength=arch_st,
+        type_competition=float(structure_type_competition),
+        plane_warp_amp=0.0,  # already warped disk/extent above
+        periodic_x=periodic_x,
+    )
+    dust_a = apply_structure_architecture_pipeline(
+        dust_a,
+        architecture,
+        vertical_extent,
+        structure_survival,
+        puff_field,
+        puff_rng,
+        latent_turb,
+        latent_ridge_hi,
+        disk_w,
+        periodic_x=periodic_x,
+        reinject_strength=float(np.clip(vertical_extent_strength * 1.08, 0.52, 1.22)),
+        puff_inject_strength=(0.38 + 0.16 * micro_s) * arch_st,
+        cloud_blend_strength=0.94 * arch_st,
+        inner_dust_lane_strength=float(np.clip(structure_inner_dust_lane_strength, 0.45, 0.95)),
+    )
+    puff_soft = gaussian_blur_pil(
+        puff_field,
+        float(np.clip(max(height, width) * 0.011, 1.0, 9.0)),
+        periodic_x=periodic_x,
+    )
+    d = transmission_from_absorption_map(
+        dust_a, void_floor=0.06, sharpness=1.55, opacity_gamma=1.12
+    )
+    d = apply_cloudy_transmission_breakup(
+        d,
+        puff_soft,
+        disk_w,
+        strength=0.44,
+        void_floor=0.06,
+        periodic_x=periodic_x,
+        drive_weight=architecture.puff_shell_weight,
+    )
+    from starsky_gen.structure_envelope import apply_band_negative_space_transmission
+
+    d = apply_band_negative_space_transmission(
+        d, architecture, void_floor=0.06, strength=0.62 * arch_st
+    )
     if micro_s > 1e-6:
         d = carve_dust_transmission_microstructure(
             d,
             dust_a,
             periodic_x=periodic_x,
-            strength=micro_s,
+            strength=micro_s * 0.62,
             void_floor=0.06,
             band_weight=disk_w,
         )
@@ -793,6 +918,9 @@ def build_galactic_morphology(
         drop_strength=drop_strength,
         obliteration=obliteration,
         brutal_erasure=brutal,
+        dust_lane_weight=architecture.dust_lane_weight,
+        lane_dropout_boost=float(lane_star_dropout_boost),
+        lane_dropout_power=float(lane_star_dropout_power),
     )
     resolve_w = inherit_resolve_weight_from_unresolved(resolve_w, u_prior)
     resolve_w = local_field_variance_stretch(
@@ -821,6 +949,7 @@ def build_galactic_morphology(
         brutal_erasure_mask=brutal.astype(np.float64),
         structure_survival=structure_survival.astype(np.float64),
         vertical_extent=vertical_extent.astype(np.float64),
+        structure_architecture=architecture,
         lat_structure_shift=lat_shift.astype(np.float64),
         lon_asymmetry=lon_asym.astype(np.float64),
         gold_population_weight=gold_pop.astype(np.float64),
@@ -1031,8 +1160,15 @@ def compute_resolve_weight_field(
     drop_strength: float,
     obliteration: np.ndarray | None = None,
     brutal_erasure: np.ndarray | None = None,
+    dust_lane_weight: np.ndarray | None = None,
+    lane_dropout_boost: float = 0.0,
+    lane_dropout_power: float = 1.1,
 ) -> np.ndarray:
-    """Plane resolve weight W from stellar density, dust transmission, and disk."""
+    """Plane resolve weight W from stellar density, dust transmission, and disk.
+
+    Optional ``dust_lane_weight`` further suppresses resolved stars in the inner
+    dust sub-band so the shell carpet reads above/below a darker midplane.
+    """
     drop = float(np.clip(drop_strength, 0.0, 1.0))
     w = np.clip(
         (0.38 + 0.62 * g)
@@ -1047,6 +1183,12 @@ def compute_resolve_weight_field(
     if brutal_erasure is not None:
         br = np.clip(np.asarray(brutal_erasure, dtype=np.float64), 0.0, 1.0)
         w = w * np.clip(1.0 - br**2.85, 0.02, 1.0)
+    boost = float(np.clip(lane_dropout_boost, 0.0, 1.0))
+    if dust_lane_weight is not None and boost > 1e-6:
+        lane = np.clip(np.asarray(dust_lane_weight, dtype=np.float64), 0.0, 1.0)
+        pwr = float(np.clip(lane_dropout_power, 0.5, 2.2))
+        opaque = np.clip(1.0 - np.clip(np.asarray(d, dtype=np.float64), 0.0, 1.0), 0.0, 1.0) ** pwr
+        w = w * np.clip(1.0 - boost * lane * opaque, 0.02, 1.0)
     return w.astype(np.float64)
 
 
@@ -1268,16 +1410,21 @@ def _add_luminous_continuum(
     raw = np.asarray(intensity, dtype=np.float64)
     cont = gaussian_blur_pil(raw, blur_sigma, periodic_x=periodic_x)
     cont = cont / (float(np.percentile(cont, 99.0)) + 1e-8)
-    cont = diffuse_scale_hierarchy(cont, strength=0.22, periodic_x=periodic_x)
+    cont = diffuse_scale_hierarchy(cont, strength=0.28, periodic_x=periodic_x)
     cont_hi = np.clip(raw - gaussian_blur_pil(raw, blur_sigma * 0.55, periodic_x=periodic_x) * 0.72, 0.0, 1.0)
-    lift = np.clip(cont * t * amp + cont_hi * t * amp * 0.55, 0.0, 0.30)
+    # Stronger soft base so discrete stars sit on a glowing plane, not define it.
+    lift = np.clip(cont * t * amp + cont_hi * t * amp * 0.48, 0.0, 0.42)
     if morph_hf is not None:
         hf = np.clip(np.asarray(morph_hf, dtype=np.float64), 0.0, 1.0)
-        lift = np.clip(lift + hf * t * amp * 0.68, 0.0, 0.36)
+        # Keep morph HF very low — cinematic plane glow is soft continuum, not grain.
+        lift = np.clip(lift + hf * t * amp * 0.18, 0.0, 0.44)
     if continuum_rgb is None:
-        rgb = np.array([0.988, 0.992, 0.998], dtype=np.float64)
+        # Slightly cool unresolved wash; warm cores come from multi-scatter later.
+        rgb = np.array([0.94, 0.97, 1.04], dtype=np.float64)
     else:
-        rgb = np.asarray(continuum_rgb, dtype=np.float64).reshape(3)
+        warm = np.asarray(continuum_rgb, dtype=np.float64).reshape(3)
+        cool = np.array([0.92, 0.96, 1.06], dtype=np.float64)
+        rgb = cool * 0.55 + warm * 0.45
     return np.maximum(0.0, canvas + lift[..., None] * rgb)
 
 
@@ -1316,8 +1463,8 @@ def compose_inherited_unresolved_field(
         structure.unresolved_prior,
         texture_strength=texture_strength,
         periodic_x=periodic_x,
-        blur_sigma=1.12,
-        amp=0.072,
+        blur_sigma=1.25,
+        amp=0.155,
         continuum_rgb=unresolved_rgb,
         morph_hf=morph_hf,
     )

@@ -357,7 +357,7 @@ def _poisson_disk_on_grid(
     gh = int(math.ceil(h / cell))
     grid: list[list[tuple[int, int] | None]] = [[None] * gw for _ in range(gh)]
     active: list[tuple[int, int]] = []
-    points: list[tuple[int, int]] = []
+    points: list[tuple[float, float]] = []
 
     def _cell_idx(x: float, y: float) -> tuple[int, int]:
         return int(np.clip(x / cell, 0, gw - 1)), int(np.clip(y / cell, 0, gh - 1))
@@ -456,13 +456,13 @@ def _accept_reject_fill(
     n_extra: int,
     density: np.ndarray,
     rng: np.random.Generator,
-    existing: list[tuple[int, int]],
+    existing: list[tuple[float, float]],
 ) -> tuple[np.ndarray, np.ndarray]:
     h, w = density.shape
     flat = density.ravel()
     flat /= flat.sum()
-    rows: list[int] = [p[0] for p in existing]
-    cols: list[int] = [p[1] for p in existing]
+    rows: list[int] = [int(p[0]) for p in existing]
+    cols: list[int] = [int(p[1]) for p in existing]
     for _ in range(n_extra * 8):
         if len(rows) >= len(existing) + n_extra:
             break

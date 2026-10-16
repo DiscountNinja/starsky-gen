@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-from starsky_gen.config import NebulaTuningConfig, RenderConfig
+from starsky_gen.config import LookTarget, NebulaTuningConfig, RenderConfig
 
 
 @dataclass
@@ -111,8 +111,13 @@ def mutate_render_config(
         0.5,
         1.8,
     )
+    look = cfg.features.look_target
+    # Cinematic is the baseline; rarely opt into parked documentary look.
+    if rng.random() < (0.04 * decay + 0.01):
+        look = LookTarget.documentary if look == LookTarget.cinematic else LookTarget.cinematic
+
     long_exposure = cfg.features.long_exposure_look
-    if rng.random() < (0.06 * decay):
+    if look == LookTarget.documentary and rng.random() < (0.08 * decay):
         long_exposure = not long_exposure
 
     cfg.nebula_tuning = NebulaTuningConfig(
@@ -122,6 +127,7 @@ def mutate_render_config(
         dust_strength=strength,
         debug_pass=cfg.nebula_tuning.debug_pass,
     )
+    cfg.features.look_target = look
     cfg.features.long_exposure_look = long_exposure
     _ = candidate_index
     return cfg

@@ -1,136 +1,17 @@
 from __future__ import annotations
 
-import json
 import math
-import time
 from pathlib import Path
-from typing import Callable, Literal
-
-# #region agent log
-_DEBUG_LOG_PATH = Path(__file__).resolve().parents[2] / ".cursor" / "debug-408793.log"
-
-
-def _dbg_band_stats(
-    canvas: np.ndarray,
-    disk_w: np.ndarray | None,
-    *,
-    center_row: int | None = None,
-) -> dict[str, float]:
-    lu = rec709_luma(np.maximum(np.asarray(canvas, dtype=np.float64), 0.0))
-    h = int(lu.shape[0])
-    cr = int(h // 2) if center_row is None else int(center_row)
-    cr = int(np.clip(cr, 0, max(0, h - 1)))
-    row = lu[max(0, cr - 2) : min(h, cr + 3), :]
-    stats: dict[str, float] = {
-        "center_row_min": float(np.min(row)),
-        "center_row_mean": float(np.mean(row)),
-        "center_row_max": float(np.max(row)),
-        "center_row_frac_lt_0.35": float(np.mean(row < 0.35)),
-    }
-    if disk_w is not None:
-        dw = np.clip(np.asarray(disk_w, dtype=np.float64), 0.0, 1.0)
-        if dw.ndim == 1:
-            dw = dw[:, None]
-        if dw.shape[0] == h:
-            band = dw[:, 0] > 0.35
-            if bool(np.any(band)):
-                b = lu[band]
-                stats.update(
-                    {
-                        "band_p50": float(np.percentile(b, 50)),
-                        "band_p95": float(np.percentile(b, 95)),
-                        "band_p99": float(np.percentile(b, 99)),
-                        "band_frac_gt_0.95": float(np.mean(b > 0.95)),
-                    }
-                )
-    return stats
-
-
-def _dbg_hist(
-    label: str,
-    field: np.ndarray,
-    disk_w: np.ndarray | None,
-    *,
-    hypothesis_id: str = "BG",
-    run_id: str | None = None,
-) -> None:
-    """Min/p50/p95/max for full frame, sky (disk<0.15), and band (disk>0.35)."""
-    import os
-
-    arr = np.clip(np.asarray(field, dtype=np.float64), 0.0, None)
-    if arr.ndim == 3:
-        arr = rec709_luma(arr)
-    flat = arr.ravel()
-    stats: dict[str, float] = {
-        "min": float(np.min(flat)),
-        "p50": float(np.percentile(flat, 50)),
-        "p95": float(np.percentile(flat, 95)),
-        "max": float(np.max(flat)),
-        "mean": float(np.mean(flat)),
-    }
-    if disk_w is not None:
-        h = int(arr.shape[0])
-        dw = np.clip(np.asarray(disk_w, dtype=np.float64), 0.0, 1.0)
-        if dw.ndim == 1:
-            dw = dw[:, None]
-        if dw.shape[0] == h:
-            sky = dw[:, 0] < 0.15
-            band = dw[:, 0] > 0.35
-            if bool(np.any(sky)):
-                s = arr[sky]
-                stats.update(
-                    {
-                        "sky_min": float(np.min(s)),
-                        "sky_p50": float(np.percentile(s, 50)),
-                        "sky_p95": float(np.percentile(s, 95)),
-                        "sky_mean": float(np.mean(s)),
-                    }
-                )
-            if bool(np.any(band)):
-                b = arr[band]
-                stats.update(
-                    {
-                        "band_min": float(np.min(b)),
-                        "band_p50": float(np.percentile(b, 50)),
-                        "band_p95": float(np.percentile(b, 95)),
-                    }
-                )
-    _dbg_log(hypothesis_id, "generator.py:_dbg_hist", label, stats, run_id=run_id)
-
-
-def _dbg_log(
-    hypothesis_id: str,
-    location: str,
-    message: str,
-    data: dict,
-    *,
-    run_id: str | None = None,
-) -> None:
-    import os
-
-    if run_id is None:
-        run_id = os.environ.get("STK_DEBUG_RUN", "pre")
-    payload = {
-        "sessionId": "408793",
-        "hypothesisId": hypothesis_id,
-        "location": location,
-        "message": message,
-        "data": data,
-        "timestamp": int(time.time() * 1000),
-        "runId": run_id,
-    }
-    try:
-        with _DEBUG_LOG_PATH.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload) + "\n")
-    except OSError:
-        pass
-
-
-# #endregion
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 import numpy as np
 from PIL import Image
 
+from starsky_gen.band_plan import (
+    BandPlan,
+    apply_band_plan_lane_protect,
+    build_band_plan,
+)
 from starsky_gen.bulge import render_bulge_layer
 from starsky_gen.dust_field import (
     apply_missing_region_extinction,
@@ -140,6 +21,7 @@ from starsky_gen.dust_field import (
     build_morphology_extinction_transmission,
     carve_extinction_discontinuities,
     attenuate_rgb_column_comb,
+    attenuate_rgb_row_comb,
     band_relative_clearance,
     emission_clearance_from_extinction,
     gas_clearance_from_extinction,
@@ -163,12 +45,28 @@ from starsky_gen.color_science import (
     warm_teffective_for_core_bulge,
 )
 from starsky_gen.hdr import HDR_DTYPE, as_hdr, ensure_hdr
-from starsky_gen.config import FeatureConfig, NebulaMode, ProjectionMode, RenderConfig
+from starsky_gen.config import (
+    FeatureConfig,
+    LookTarget,
+    NebulaMode,
+    ProjectionMode,
+    RenderConfig,
+    finalize_render_config,
+)
 from starsky_gen.dither import apply_blue_noise_dither_u8
+
+if TYPE_CHECKING:
+    from starsky_gen.structure_envelope import MorphologyIsmLayers
+from starsky_gen.hero_stars import (
+    HeroStarRecord,
+    attach_hero_flags,
+    select_hero_indices,
+)
 from starsky_gen.optical_effects import (
     apply_film_grain_display,
     apply_isp_linear_chain,
     inject_sensor_noise,
+    paint_hero_lens_ghosts,
 )
 from starsky_gen.postfx import (
     apply_color_stratification,
@@ -176,10 +74,15 @@ from starsky_gen.postfx import (
     apply_directional_motion_blur,
     apply_lightwrap_stars,
     apply_masked_density_sharpen,
+    apply_tri_scale_bloom,
     depth_map_from_disk,
 )
 from starsky_gen.postfx import apply_band_display_highlight_cap
-from starsky_gen.tone_grade import apply_galaxy_display_finish, apply_galaxy_linear_grade_pipeline
+from starsky_gen.tone_grade import (
+    apply_galaxy_display_finish,
+    apply_galaxy_linear_grade_pipeline,
+    apply_galaxy_scene_tone,
+)
 from starsky_gen.nebula import (
     _blur_rgb_separable_xy,
     _blur_separable_xy,
@@ -192,6 +95,7 @@ from starsky_gen.galactic_band_color import (
     apply_band_display_microstructure,
     apply_band_luma_separation,
     apply_galactic_band_color_grade,
+    suppress_gold_chroma_islands,
 )
 from starsky_gen.disk_radiance import (
     apply_shared_photon_exposure,
@@ -222,6 +126,7 @@ from starsky_gen.procedural_noise import gaussian_blur_pil
 from starsky_gen.projections import cubemap_faces_from_equirect, sph_to_equirect_xy, sph_to_equirect_xy_float
 from starsky_gen.psf import (
     PsfTuning,
+    StarPsfStyle,
     StarPsfVariety,
     flux_from_mag,
     sample_star_psf_variety,
@@ -246,6 +151,7 @@ from starsky_gen.starfield import (
     STAR_SIZE_NAMES,
     _paint_thin_diffraction_spikes,
     catalog_stats,
+    cull_catalog_to_plane,
     cull_faint_resolved_stars,
     paint_star,
     rgb_from_bv,
@@ -287,20 +193,29 @@ def _sample_ext_scalar_bilinear(
     return float(np.clip(zb0 + ty * (zb1 - zb0), 0.0, 1.0))
 
 
-def _psf_tuning_from_features(feat: FeatureConfig) -> PsfTuning:
+def _psf_tuning_from_features(
+    feat: FeatureConfig, *, galaxy_streak: bool = False
+) -> PsfTuning:
+    mag_gamma = float(feat.mag_radius_gamma)
+    fwhm_coeff = float(feat.psf_fwhm_mag_coeff)
+    fwhm_base = float(feat.psf_fwhm_base_px)
+    if galaxy_streak:
+        mag_gamma = min(mag_gamma * 2.4, 0.34)
+        fwhm_coeff *= 1.32
+        fwhm_base *= 1.08
     return PsfTuning(
         sigma_core_min=feat.psf_sigma_core_min,
         sigma_core_max=feat.psf_sigma_core_max,
         beta_default=feat.psf_beta_default,
-        fwhm_base_px=feat.psf_fwhm_base_px,
+        fwhm_base_px=fwhm_base,
         fwhm_ref_mag=feat.psf_fwhm_ref_mag,
-        fwhm_mag_coeff=feat.psf_fwhm_mag_coeff,
+        fwhm_mag_coeff=fwhm_coeff,
         fwhm_bright_jitter_sigma=feat.psf_fwhm_bright_jitter,
         fwhm_faint_jitter_half=feat.psf_fwhm_faint_jitter,
         halo_sigma_bright=feat.psf_halo_sigma_bright,
         halo_amp=feat.psf_halo_amp,
         m_bloom_cut=feat.m_bloom_cut,
-        mag_radius_gamma=feat.mag_radius_gamma,
+        mag_radius_gamma=mag_gamma,
         max_half_px=feat.psf_max_half_px,
         mag_bright=feat.mag_bright_lim,
         mag_faint=feat.mag_faint_lim,
@@ -620,6 +535,14 @@ def _save_layer_u8(gray: np.ndarray, path: Path) -> None:
     Image.fromarray((g * 255.0 + 0.5).astype(np.uint8), mode="L").save(path)
 
 
+def _save_layer_rgb(rgb: np.ndarray, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    x = np.clip(np.asarray(rgb, dtype=np.float64), 0.0, 1.0)
+    if x.ndim == 2:
+        x = np.stack([x, x, x], axis=-1)
+    Image.fromarray((x * 255.0 + 0.5).astype(np.uint8), mode="RGB").save(path)
+
+
 def _export_morphology_debug_layers(
     cfg: RenderConfig,
     base_name: str,
@@ -630,6 +553,10 @@ def _export_morphology_debug_layers(
     stars_fg: np.ndarray,
     ext_paint: np.ndarray | None,
     rng_post: np.random.Generator,
+    neb_puff_mod: np.ndarray | None = None,
+    morph_gas_struct: np.ndarray | None = None,
+    band_bleed_env: np.ndarray | None = None,
+    band_plan: BandPlan | None = None,
 ) -> None:
     if not cfg.features.debug_export_layers and not cfg.features.debug_grayscale_morphology:
         return
@@ -647,6 +574,25 @@ def _export_morphology_debug_layers(
         _save_layer_u8(maps["dust_absorption"], out_dir / "dust_A_effective.png")
         _save_layer_u8(maps["dust_transmission"], out_dir / "dust_D_effective.png")
         _save_layer_u8(galactic.disk_weight, out_dir / "disk_weight.png")
+        if "turbulence_architecture" in maps:
+            _save_layer_u8(maps["turbulence_architecture"], out_dir / "turbulence_architecture.png")
+        if "architecture_puff_weight" in maps:
+            _save_layer_u8(maps["architecture_puff_weight"], out_dir / "architecture_puff_W.png")
+        if "architecture_reinject_weight" in maps:
+            _save_layer_u8(
+                maps["architecture_reinject_weight"], out_dir / "architecture_reinject_W.png"
+            )
+        if "architecture_dust_lane" in maps:
+            _save_layer_u8(maps["architecture_dust_lane"], out_dir / "architecture_dust_lane.png")
+        if "architecture_negative_space" in maps:
+            _save_layer_u8(
+                maps["architecture_negative_space"], out_dir / "architecture_negative_space.png"
+            )
+        if galactic.structure_architecture is not None:
+            from starsky_gen.structure_envelope import build_structure_architecture_type_map
+
+            type_rgb = build_structure_architecture_type_map(galactic.structure_architecture)
+            _save_layer_rgb(type_rgb, out_dir / "structure_type_map.png")
         if galactic.disk_thickness_modulation is not None:
             mod_vis = np.clip(
                 0.5 + 0.5 * galactic.disk_thickness_modulation, 0.0, 1.0
@@ -671,9 +617,29 @@ def _export_morphology_debug_layers(
             _save_layer_u8(morphology_grayscale_preview(galactic), out_dir / "morphology_gray.png")
     if ext_paint is not None:
         _save_layer_u8(ext_paint, out_dir / "extinction.png")
+    if band_plan is not None:
+        _save_layer_u8(band_plan.lane_weight, out_dir / "band_plan_lane.png")
+        _save_layer_u8(band_plan.rift_mask, out_dir / "band_plan_rift.png")
+        _save_layer_u8(band_plan.protect_mask, out_dir / "band_plan_protect.png")
+        _save_layer_u8(band_plan.shell_weight, out_dir / "band_plan_shell.png")
     star_stack = np.maximum(0.0, stars_bg + stars_mid * 0.92 + stars_fg)
-    luma = np.clip(rec709_luma(star_stack), 0.0, 1.0)
-    _save_layer_u8(luma, out_dir / "resolved_stars.png")
+    star_vis = star_stack / (float(np.percentile(star_stack, 99.5)) + 1e-8)
+    _save_layer_rgb(np.clip(star_vis, 0.0, 1.0), out_dir / "resolved_stars.png")
+    if neb_puff_mod is not None:
+        _save_layer_u8(
+            np.clip(neb_puff_mod, 0.0, 1.0),
+            out_dir / "debug_neb_puff_mod.png",
+        )
+    if morph_gas_struct is not None:
+        _save_layer_u8(
+            np.clip(morph_gas_struct, 0.0, 1.0),
+            out_dir / "debug_morph_gas_struct.png",
+        )
+    if band_bleed_env is not None:
+        _save_layer_u8(
+            np.clip(band_bleed_env, 0.0, 1.0),
+            out_dir / "debug_band_bleed_env.png",
+        )
     if galactic is not None:
         unresolved_only = np.zeros_like(star_stack)
         unresolved_only = compose_inherited_unresolved_field(
@@ -691,6 +657,98 @@ def _export_morphology_debug_layers(
 def _galactic_disk_weight(height: int, sigma: float = 0.46) -> np.ndarray:
     yy = np.linspace(-1.0, 1.0, height, dtype=np.float64)[:, None]
     return np.exp(-((yy**2) / (sigma**2)))
+
+
+def build_dark_rift_mask(
+    height: int,
+    width: int,
+    rng: np.random.Generator,
+    disk_w: np.ndarray,
+    lon_asymmetry: np.ndarray | None,
+    *,
+    coverage: float = 0.12,
+    strength: float = 0.55,
+    periodic_x: bool = True,
+) -> np.ndarray:
+    """Sparse high-contrast midplane rift weight in [0,1], longitude-biased."""
+    s = float(np.clip(strength, 0.0, 1.25))
+    if s < 1e-6:
+        return np.zeros((height, width), dtype=np.float64)
+    cov = float(np.clip(coverage, 0.02, 0.35))
+    dw = np.clip(np.asarray(disk_w, dtype=np.float64), 0.0, 1.0)
+    if dw.ndim == 1:
+        dw = np.broadcast_to(dw.reshape(height, 1), (height, width))
+    elif dw.shape != (height, width):
+        dw = _resize_bilinear(dw, height, width, periodic_x=periodic_x)
+    ch = max(8, height // 18)
+    cw = max(12, width // 22)
+    field = rng.random((ch, cw))
+    field = _resize_bilinear(field, height, width, periodic_x=periodic_x)
+    field = _blur_separable_xy(field, passes=1, periodic_x=periodic_x)
+    # Keep only top coverage quantile inside the disk.
+    thr = float(np.quantile(field[dw > 0.22], 1.0 - cov)) if np.any(dw > 0.22) else 0.85
+    rifts = np.clip((field - thr) / max(1.0 - thr, 0.05), 0.0, 1.0) ** 1.35
+    yy = np.linspace(-1.0, 1.0, height, dtype=np.float64)[:, None]
+    mid = np.exp(-(yy**2) / 0.045)
+    mid = np.broadcast_to(mid, (height, width))
+    rifts = rifts * mid * (dw**0.85)
+    if lon_asymmetry is not None:
+        lon = np.clip(np.asarray(lon_asymmetry, dtype=np.float64), 0.42, 1.62)
+        if lon.ndim == 1:
+            lon = np.broadcast_to(lon.reshape(1, -1), (height, width))
+        elif lon.shape != (height, width):
+            lon = _resize_bilinear(lon, height, width, periodic_x=periodic_x)
+        # Prefer fractured/disaster longitudes (lon > 1).
+        rifts = rifts * np.clip(0.55 + 0.70 * (lon - 0.85), 0.35, 1.35)
+    rifts = _blur_separable_xy(rifts, passes=1, periodic_x=periodic_x)
+    return np.clip(rifts * s, 0.0, 1.0).astype(np.float64)
+
+
+def apply_dark_rifts_to_extinction(
+    ext_paint: np.ndarray,
+    rift_mask: np.ndarray,
+    *,
+    void_floor: float = 0.06,
+) -> np.ndarray:
+    """Carve transmission down inside rift mask (darker = more extinct)."""
+    if float(np.max(rift_mask)) < 1e-6:
+        return ext_paint
+    t = np.clip(np.asarray(ext_paint, dtype=np.float64), 0.0, 1.0)
+    r = np.clip(np.asarray(rift_mask, dtype=np.float64), 0.0, 1.0)
+    floor = float(np.clip(void_floor, 0.02, 0.2))
+    return np.clip(t * (1.0 - 0.96 * r) + floor * r * 0.22, floor, 1.0).astype(np.float64)
+
+
+def apply_post_star_lane_protect(
+    canvas: np.ndarray,
+    *,
+    ext_paint: np.ndarray,
+    disk_w: np.ndarray,
+    dust_lane_weight: np.ndarray | None,
+    rift_mask: np.ndarray | None,
+    strength: float,
+    periodic_x: bool = True,
+    hero_luma_floor: float = 0.88,
+    plan: BandPlan | None = None,
+) -> np.ndarray:
+    """Re-darken dust lane / rifts after star composite; protect brightest heroes."""
+    if plan is None:
+        h, w = canvas.shape[:2]
+        plan = build_band_plan(
+            height=h,
+            width=w,
+            disk_w=disk_w,
+            ext_paint=ext_paint,
+            dust_lane_weight=dust_lane_weight,
+            rift_mask=rift_mask,
+            periodic_x=periodic_x,
+        )
+    return apply_band_plan_lane_protect(
+        canvas,
+        plan,
+        strength=strength,
+        hero_luma_floor=hero_luma_floor,
+    )
 
 
 def _apply_long_exposure_look(
@@ -778,25 +836,6 @@ def _apply_galactic_disk_luminance_envelope(
     # Ease off in the outer disk halo so grade stacks gently with disk_w-based passes later.
     ease = 0.62 + 0.38 * disk_w
     scale = 1.0 + (scale - 1.0) * ease
-    # #region agent log
-    _cr = int(canvas.shape[0] // 2)
-    _row_scale = scale[_cr, :]
-    _dbg_log(
-        "A",
-        "generator.py:_apply_galactic_disk_luminance_envelope",
-        "disk envelope scale along center row",
-        {
-            "lu_med": lu_med,
-            "amp": amp,
-            "center_notch_peak": float(np.max(center_notch)),
-            "scale_row_min": float(np.min(_row_scale)),
-            "scale_row_max": float(np.max(_row_scale)),
-            "scale_row_mean": float(np.mean(_row_scale)),
-            "bulge_row_min": float(np.min(bulge[_cr, :])),
-            "bulge_row_max": float(np.max(bulge[_cr, :])),
-        },
-    )
-    # #endregion
     return np.maximum(canvas * scale[..., None], 0.0)
 
 
@@ -986,14 +1025,17 @@ def _apply_separated_disk_sky_grain(
     periodic_x: bool,
     texture_strength: float = 1.0,
     speckle_scale: float = 1.0,
+    sky_density_scale: float = 1.0,
 ) -> np.ndarray:
+    """Crisp unresolved-star texture: denser in galactic band, sparse in outer sky."""
     t = float(np.clip(texture_strength, 0.0, 2.0))
     sp = float(np.clip(speckle_scale, 0.0, 2.0))
-    """Crisp unresolved-star texture: denser in galactic band, sparse in outer sky."""
+    sky_s = float(np.clip(sky_density_scale, 0.05, 2.0))
     yy = np.linspace(-1.0, 1.0, height)[:, None]
     xx = np.linspace(-1.0, 1.0, width, dtype=np.float64)[None, :]
-    band = np.exp(-((yy**2) / 0.55))
-    sky_w = np.clip(1.0 - band, 0.0, 1.0) ** 0.38
+    # Tighter band so poles stay nearly empty (photogenic voids).
+    band = np.exp(-((yy**2) / 0.38)) ** 1.15
+    sky_w = np.clip(1.0 - band, 0.0, 1.0) ** 0.55
     # Seed-driven bulge placement/shape so center concentration is not static between seeds.
     bulge_cx = float(np.clip(rng.normal(0.0, 0.20), -0.62, 0.62))
     bulge_w = float(rng.uniform(0.16, 0.36))
@@ -1021,7 +1063,7 @@ def _apply_separated_disk_sky_grain(
 
     # Full-res point process: crisp micro-speckles everywhere with center/band weighting.
     core_center = np.clip((band**0.58) * (0.74 + 0.26 * bulge), 0.0, 1.0)
-    sky_gate = np.clip((sky_w - 0.10) / 0.90, 0.0, 1.0)
+    sky_gate = np.clip((sky_w - 0.10) / 0.90, 0.0, 1.0) * sky_s
 
     p_core = (
         (0.00032 + 0.00092 * rng.random((height, width))) * sky_gate
@@ -1516,14 +1558,6 @@ def _composite_red_hii_late(
             hot = float(np.clip((p95 - 0.42) / 0.30, 0.0, 1.0))
             s *= float(np.clip(1.0 - hot * 0.92, 0.06, 1.0))
     s = float(np.clip(s, 0.0, 0.32))
-    # #region agent log
-    _dbg_log(
-        "E",
-        "generator.py:_composite_red_hii_late",
-        "effective late H II strength",
-        {"config_strength": strength, "effective_s": s},
-    )
-    # #endregion
     out = canvas
     if band_hii_layer is not None and float(np.max(band_hii_layer)) > 1e-8:
         out = _composite_off_band_layer(
@@ -1624,10 +1658,13 @@ def _reinforce_morph_canvas_texture(
     scale = float(max(g.shape))
     sig = float(np.clip(scale * 0.0035, 0.4, 4.5))
     med = gaussian_blur_pil(g, sig, periodic_x=True)
+    from starsky_gen.dust_field import attenuate_row_comb
+
     hp = np.clip(g - med * 0.72, 0.0, 1.0) ** 1.02
+    hp = attenuate_row_comb(hp, disk_w, strength=0.68)
     puff = hp * gate
     void = (1.0 - hp) * gate
-    warm = np.array([0.20, 0.16, 0.12], dtype=np.float64)
+    warm = np.array([0.14, 0.13, 0.12], dtype=np.float64)
     out = np.maximum(np.asarray(canvas, dtype=np.float64), 0.0)
     out = out + puff[..., np.newaxis] * warm * (0.46 * s)
     out = out * (1.0 - void[..., np.newaxis] * (0.17 * s))
@@ -1686,7 +1723,11 @@ def _sculpt_morphology_lane_contrast(
     dark = np.clip(dark - row_mean * 0.62, 0.0, 1.0) ** 1.06
     d_soft = _blur_separable_xy(dark, passes=1, periodic_x=True)
     dark = np.clip(dark + (dark - d_soft) * 0.32, 0.0, 1.0) ** 1.10
-    carve = np.clip(dark * gate * s, 0.0, 0.52)
+    lu = rec709_luma(np.maximum(canvas, 0.0))
+    lu_blur = _blur_separable_xy(lu, passes=1, periodic_x=True)
+    hf = np.clip(lu - lu_blur, 0.0, None)
+    pointness = np.clip(hf / np.maximum(lu, 1e-6), 0.0, 1.0) ** 0.88
+    carve = np.clip(dark * gate * s * (1.0 - pointness * 0.94), 0.0, 0.38)
     return np.maximum(0.0, canvas * (1.0 - carve[..., np.newaxis]))
 
 
@@ -1797,23 +1838,6 @@ def finalize_band_linear_hdr(
     scale = np.where(lu > cap, cap / np.maximum(lu, 1e-8), 1.0)
     eff = 1.0 - (hot_only * plane)[..., np.newaxis] * (1.0 - scale[..., np.newaxis])
     out = np.maximum(0.0, lin * eff).astype(np.float64)
-    _fin = _dbg_band_stats(out, disk_w)
-    _lu_out = rec709_luma(out)
-    if bool(np.any(band)):
-        _fin["band_std"] = float(np.std(_lu_out[band]))
-    # #region agent log
-    _dbg_log(
-        "F",
-        "generator.py:finalize_band_linear_hdr",
-        "linear HDR finalize",
-        {
-            "peak_target": peak_target,
-            "plane_luma_cap": plane_luma_cap,
-            "peak_in": peak,
-            **_fin,
-        },
-    )
-    # #endregion
     return out.astype(np.float64)
 
 
@@ -1897,7 +1921,14 @@ def _apply_band_dark_patches(
     gate = _structure_host_gate(galactic, canvas.shape[0], canvas.shape[1])
     gate = np.clip(dw * gate, 0.0, 1.0)
     rel_clear = band_relative_clearance(ext, disk_w, min_clear=0.10, power=1.0)
-    dark = np.clip(1.0 - rel_clear, 0.0, 1.0) ** 1.28
+    dark = np.clip(1.0 - rel_clear, 0.0, 1.0) ** 1.12
+    if morph_primary:
+        rel_med = (
+            float(np.percentile(rel_clear[gate > 0.18], 50))
+            if bool(np.any(gate > 0.18))
+            else float(np.percentile(rel_clear, 50))
+        )
+        s *= float(np.clip(rel_med / 0.42, 0.18, 0.55))
     if galactic is not None and not morph_primary:
         void_w = np.clip(galactic.void_mask, 0.0, 1.0)
         dust_a = np.clip(galactic.dust_absorption, 0.0, 1.0)
@@ -1907,27 +1938,9 @@ def _apply_band_dark_patches(
         dark = np.maximum(dark, brutal * brutal * 0.28)
     dark_sm = _blur_separable_xy(dark * gate, passes=2, periodic_x=periodic_x)
     dark = np.clip(dark + (dark - dark_sm) * 0.28, 0.0, 1.0) ** 1.08
-    carve = np.clip(dark * gate * s, 0.0, 0.78)
-    floor = np.clip(1.0 - carve * 0.92, 0.06, 1.0)
+    carve = np.clip(dark * gate * s, 0.0, 0.52)
+    floor = np.clip(1.0 - carve * 0.68, 0.12, 1.0)
     out = np.maximum(0.0, canvas * floor[..., np.newaxis])
-    # #region agent log
-    _cr = int(canvas.shape[0] // 2)
-    _dbg_log(
-        "B",
-        "generator.py:_apply_band_dark_patches",
-        "dark patch floor on center row",
-        {
-            "strength": s,
-            "rel_clear_band_p50": float(np.percentile(rel_clear[gate > 0.18], 50))
-            if bool(np.any(gate > 0.18))
-            else float(np.percentile(rel_clear, 50)),
-            "floor_row_min": float(np.min(floor[_cr, :])),
-            "floor_row_mean": float(np.mean(floor[_cr, :])),
-            "carve_row_max": float(np.max(carve[_cr, :])),
-            **_dbg_band_stats(out, disk_w, center_row=_cr),
-        },
-    )
-    # #endregion
     return out
 
 
@@ -2016,6 +2029,7 @@ def _add_stars_from_catalog(
     trail_step_px: float = 0.0,
     trail_angle_rad: float | None = None,
     population: Literal["cosmic", "halo", "galactic"] = "galactic",
+    hero_records: list[HeroStarRecord] | None = None,
 ) -> dict[str, dict[str, int]]:
     xs, ys = sph_to_equirect_xy(catalog["lon"], catalog["lat"], cfg.width, cfg.height)
     xf_coords, yf_coords = sph_to_equirect_xy_float(catalog["lon"], catalog["lat"], cfg.width, cfg.height)
@@ -2024,12 +2038,20 @@ def _add_stars_from_catalog(
     if progress_cb is not None:
         progress_cb(0.0)
     next_report = 0.05
-    psf_tune = _psf_tuning_from_features(cfg.features)
+    psf_tune = _psf_tuning_from_features(
+        cfg.features, galaxy_streak=cfg.nebula_mode == NebulaMode.galaxy_streak
+    )
     redden_s = float(cfg.features.star_reddening_strength)
     bulge_s = float(cfg.features.bulge_warmth_strength)
     spectral_stars = bool(cfg.features.use_spectral_teffective)
     spike_budget = int(cfg.features.spike_max_count)
     spikes_used = 0
+    hero_mask = catalog.get("_hero")
+    if hero_mask is not None:
+        hero_mask = np.asarray(hero_mask, dtype=bool)
+        # Heroes claim spike budget first so they always get diffraction spikes.
+        n_heroes = int(np.sum(hero_mask))
+        spikes_used = min(n_heroes, spike_budget)
     cx = cfg.width * 0.5
     cy = cfg.height * 0.5
     drop_max = float(cfg.features.disk_star_density_dropout)
@@ -2060,7 +2082,7 @@ def _add_stars_from_catalog(
                     progress_cb(min(frac, 1.0))
                     next_report += 0.05
             continue
-        if use_structure_split and not deposit_primary:
+        if use_structure_split and not deposit_primary and galactic_structure is not None:
             dw_arr = galactic_structure.disk_weight if galactic_structure is not None else disk_w
             dw = float(dw_arr[yi_px, xi_px]) if dw_arr is not None else 0.5
             g_loc = galactic_structure.sample_stellar(yi_px, xi_px)
@@ -2171,9 +2193,10 @@ def _add_stars_from_catalog(
         bv_w: float | None = float(catalog["bv"][i]) if has_bv else None
         plane_w = float(np.exp(-((catalog["lat"][i] / 0.36) ** 2)))
         x_n_star = float(xs[i]) / max(cfg.width - 1, 1)
+        # Narrow lat gate — shoulders get almost no core_gold paint.
         core_gold = float(
-            np.exp(-((catalog["lat"][i] / 0.32) ** 2))
-            * np.exp(-(((x_n_star - 0.5) / 0.28) ** 2))
+            np.exp(-((catalog["lat"][i] / 0.10) ** 2))
+            * np.exp(-(((x_n_star - 0.5) / 0.24) ** 2))
         )
         if (
             cfg.features.galaxy_view
@@ -2188,6 +2211,21 @@ def _add_stars_from_catalog(
             else:
                 pop_gold = 1.0
             core_gold *= float(np.clip(pop_gold, 0.0, 1.0))
+            # Extra disk_weight power curve kills shoulder gold stars.
+            if galactic_structure is not None:
+                dw_s = float(
+                    np.clip(
+                        galactic_structure.disk_weight[
+                            int(np.clip(yi_px, 0, galactic_structure.height - 1)),
+                            int(xi_px) % int(galactic_structure.width),
+                        ],
+                        0.0,
+                        1.0,
+                    )
+                )
+                core_gold *= float(dw_s**4.0)
+            else:
+                core_gold *= float(plane_w**3.2)
 
         # Large disk stars: gold in core; hot blue only off-plane / rare.
         if has_bv and bv_w is not None and radius >= 6:
@@ -2266,21 +2304,21 @@ def _add_stars_from_catalog(
             color = star_color(color_name, star_jitter)
             if color_name == "red":
                 color = color * 0.5
-        # Hot stars: gold in core; cool blue only off-plane and rare.
+        # Hot stars: mild warm core bias; cool blue only off-plane and rare.
         if not cluster_layer and cfg.features.galaxy_view and photoreal_paint:
             if has_bv and bv_w is not None and bv_w <= 0.12 and rng.random() < 0.14:
                 teff_hot = float(catalog["teff"][i]) if "teff" in catalog else 0.0
                 if spectral_stars and teff_hot > 9000.0:
-                    if core_gold > 0.22:
-                        gold_hot = np.array([1.16, 0.96, 0.72], dtype=np.float64)
-                        mix = float(np.clip(0.22 + 0.55 * core_gold, 0.22, 0.72))
+                    if core_gold > 0.28:
+                        gold_hot = np.array([1.08, 0.98, 0.82], dtype=np.float64)
+                        mix = float(np.clip(0.10 + 0.22 * core_gold, 0.10, 0.28))
                         color = np.clip(color * (1.0 - mix) + gold_hot * mix, 0.0, 1.0)
                     elif plane_w < 0.32 and rng.random() < 0.35:
                         cool_hot = np.array([0.86, 0.93, 1.14], dtype=np.float64)
                         color = np.clip(color * 0.88 + cool_hot * 0.12, 0.0, 1.0)
                 else:
                     warm_hot = np.array([0.98, 0.94, 0.86], dtype=np.float64)
-                    color = np.clip(color * 0.88 + warm_hot * 0.12, 0.0, 1.0)
+                    color = np.clip(color * 0.92 + warm_hot * 0.08, 0.0, 1.0)
         if cluster_layer:
             color = color * rng.uniform(0.58, 0.98)
         elif foreground_layer:
@@ -2298,7 +2336,7 @@ def _add_stars_from_catalog(
                 hue_scale = 0.22 if has_bv else 0.55
                 blue_pull = 0.56 * (1.0 - 0.55 * plane_w)
             hue_scale *= chroma_w
-            gold_pull = (0.22 + 0.38 * core_gold) * plane_w * chroma_w
+            gold_pull = (0.10 + 0.18 * core_gold) * plane_w * chroma_w
             color = color * np.array(
                 [
                     1.0 + hue * hue_scale + gold_pull * max(hue, 0.0),
@@ -2346,6 +2384,40 @@ def _add_stars_from_catalog(
             plane = float(np.exp(-((catalog["lat"][i] / 0.34) ** 2)))
             cool = np.array([0.98, 0.99, 1.01], dtype=np.float64)
             color = color * ((1.0 - 0.04 * plane) * 1.0 + 0.04 * plane * cool)
+        # Cinematic: warm plane vs cool/white sky (cosmic + low disk_w).
+        if (
+            getattr(cfg.features, "look_target", None) == LookTarget.cinematic
+            and not foreground_layer
+            and not cluster_layer
+            and cfg.features.galaxy_view
+        ):
+            dw_paint = plane_w
+            if disk_w is not None:
+                dw_arr = np.asarray(disk_w, dtype=np.float64)
+                if dw_arr.ndim == 2:
+                    dw_paint = float(
+                        dw_arr[
+                            int(np.clip(yi_px, 0, dw_arr.shape[0] - 1)),
+                            int(xi_px) % int(dw_arr.shape[1]),
+                        ]
+                    )
+                elif dw_arr.ndim == 1 and dw_arr.shape[0] > 0:
+                    dw_paint = float(dw_arr[int(np.clip(yi_px, 0, dw_arr.shape[0] - 1))])
+            elif galactic_structure is not None:
+                dw_paint = float(
+                    galactic_structure.disk_weight[
+                        int(np.clip(yi_px, 0, galactic_structure.height - 1)),
+                        int(xi_px) % int(galactic_structure.width),
+                    ]
+                )
+            if population == "cosmic" or dw_paint < 0.24:
+                cool_sky = np.array([0.90, 0.95, 1.10], dtype=np.float64)
+                cool_amt = 0.14 if population == "cosmic" else 0.09 * (1.0 - dw_paint)
+                color = np.clip(color * (1.0 - cool_amt) + cool_sky * cool_amt, 0.0, 1.0)
+            elif dw_paint > 0.38:
+                warm_pl = np.array([1.07, 0.99, 0.88], dtype=np.float64)
+                warm_amt = 0.11 * float(np.clip((dw_paint - 0.38) / 0.42, 0.0, 1.0))
+                color = np.clip(color * (1.0 - warm_amt) + warm_pl * warm_amt, 0.0, 1.0)
         if not foreground_layer and cfg.features.galaxy_view and not cluster_layer:
             plane_star = float(np.exp(-((catalog["lat"][i] / 0.36) ** 2)))
             x_n0 = float(xs[i]) / max(cfg.width - 1, 1)
@@ -2365,29 +2437,17 @@ def _add_stars_from_catalog(
             color = color * (halo_w * halo_mix_strength * halo_mix + (1.0 - halo_w * halo_mix_strength))
             color = np.clip(color, 0.0, 1.0)
         if not foreground_layer and not cluster_layer and cfg.features.galaxy_view:
-            gold_scale = 1.42 if (photoreal_paint and spectral_stars) else 1.0
+            # Soft warm disk bias only — hard gold_ref mix was reading as streak islands.
+            gold_scale = 0.55 if (photoreal_paint and spectral_stars) else 0.40
             if spectral_stars and "teff" in catalog:
                 teff_i = float(catalog["teff"][i])
-                if teff_i > 9000.0 and core_gold > 0.30:
-                    gold_scale *= 1.38
-                elif teff_i > 11000.0 and core_gold < 0.12:
+                if teff_i > 11000.0 and core_gold < 0.12:
                     gold_scale *= 0.40
-            warm_core = np.array([0.32, 0.21, 0.042], dtype=np.float64)
-            color = np.clip(color + warm_core * (core_gold * 3.6 * gold_scale), 0.0, 1.0)
-            gw = float(np.clip(1.08 * core_gold * gold_scale, 0.0, 0.96))
-            gold_shift = np.array([1.24, 0.92, 0.58], dtype=np.float64)
+            warm_core = np.array([0.14, 0.10, 0.04], dtype=np.float64)
+            color = np.clip(color + warm_core * (core_gold * 0.70 * gold_scale), 0.0, 1.0)
+            gw = float(np.clip(0.22 * core_gold * gold_scale, 0.0, 0.28))
+            gold_shift = np.array([1.06, 0.99, 0.88], dtype=np.float64)
             color = np.clip(color * ((1.0 - gw) + gw * gold_shift), 0.0, 1.0)
-            if core_gold > 0.08:
-                wc = float(np.clip((core_gold - 0.08) / 0.40, 0.0, 1.0)) * gold_scale
-                color = np.clip(
-                    color * (1.0 + wc * np.array([0.14, 0.018, -0.16], dtype=np.float64)),
-                    0.0,
-                    1.0,
-                )
-            if core_gold > 0.38:
-                mg = float(np.clip((core_gold - 0.38) / 0.52, 0.0, 1.0)) * gold_scale
-                gold_ref = np.array([1.22, 0.86, 0.48], dtype=np.float64)
-                color = np.clip(color * (1.0 - mg * 0.88) + gold_ref * (mg * 0.88), 0.0, 1.0)
         if foreground_layer and cfg.features.galaxy_view and not cluster_layer:
             x_n = float(xs[i]) / max(cfg.width - 1, 1)
             bulge_proxy = float(
@@ -2441,6 +2501,23 @@ def _add_stars_from_catalog(
             )
             a_v = extinction_from_transmission(et, strength=redden_s)
             color = extinction_redden(np.maximum(color, 0.0), a_v, rv=cfg.features.extinction_r_v)
+        # Cap gold chroma after reddening (reddening re-introduces saturated R-G islands).
+        if (
+            not foreground_layer
+            and not cluster_layer
+            and cfg.features.galaxy_view
+            and plane_w > 0.18
+        ):
+            g_ex = float(color[0] - max(float(color[1]), float(color[2])) * 1.05)
+            if g_ex > 0.045:
+                pull = float(np.clip((g_ex - 0.045) / 0.14, 0.0, 1.0)) * 0.85 * plane_w
+                color = np.clip(
+                    color
+                    + np.array([-pull * g_ex, pull * g_ex * 0.50, pull * g_ex * 0.28], dtype=np.float64),
+                    0.0,
+                    1.0,
+                )
+        is_hero = bool(hero_mask is not None and i < hero_mask.shape[0] and hero_mask[i])
         if photoreal_paint:
             mag = float(catalog["phot_mag"][i])
             flux_val = flux_from_mag(mag, cfg.features.magnitude_ref_mag)
@@ -2455,6 +2532,28 @@ def _add_stars_from_catalog(
                 a_v = extinction_from_transmission(et, strength=redden_s)
                 spectral = extinction_redden(spectral, a_v, rv=cfg.features.extinction_r_v)
                 flux_val *= ccm89_v_band_transmission(a_v)
+                # Dense-dust peak cut — skip heroes so anchors stay readable.
+                if not is_hero and not foreground_layer and not cluster_layer:
+                    dust_u = float(np.clip(1.0 - et, 0.0, 1.0))
+                    flux_val *= float(np.clip(1.0 - 0.18 * dust_u, 0.82, 1.0))
+            if (
+                not foreground_layer
+                and not cluster_layer
+                and cfg.features.galaxy_view
+                and plane_w > 0.18
+            ):
+                g_ex = float(spectral[0] - max(float(spectral[1]), float(spectral[2])) * 1.05)
+                if g_ex > 0.045:
+                    pull = float(np.clip((g_ex - 0.045) / 0.14, 0.0, 1.0)) * 0.85 * plane_w
+                    spectral = np.clip(
+                        spectral
+                        + np.array(
+                            [-pull * g_ex, pull * g_ex * 0.50, pull * g_ex * 0.28],
+                            dtype=np.float64,
+                        ),
+                        0.0,
+                        1.0,
+                    )
             if eff_bulge_s > 1e-6:
                 bw = _bulge_warmth_scalar(float(catalog["lon"][i]), float(catalog["lat"][i]), cfg.width)
                 flux_val *= 1.0 + 0.22 * bw * eff_bulge_s
@@ -2474,19 +2573,26 @@ def _add_stars_from_catalog(
                 flux_val *= float(rng.uniform(0.94, 1.24))
             if cluster_layer:
                 flux_val *= float(rng.uniform(1.22, 1.68))
+            if population == "cosmic":
+                flux_val *= 1.16
             if dust_vis_arr is not None:
                 flux_val *= float(dust_vis_arr[i])
             if galactic_structure is not None:
                 flux_val *= 0.88 + 0.12 * galactic_structure.sample_psf_env(yi_px, xi_px)
+            if is_hero:
+                flux_val *= float(rng.uniform(1.35, 1.75))
             field_ang = math.atan2(float(yf_coords[i] - cy), float(xf_coords[i] - cx))
-            do_spike = spikes_used < spike_budget and flux_val >= spike_flux_cut
-            if do_spike:
-                spikes_used += 1
+            if is_hero:
+                do_spike = True
+            else:
+                do_spike = spikes_used < spike_budget and flux_val >= spike_flux_cut
+                if do_spike:
+                    spikes_used += 1
             star_bv = float(catalog["bv"][i]) if "bv" in catalog else None
             star_teff = float(catalog["teff"][i]) if "teff" in catalog else None
-            if foreground_layer:
+            if foreground_layer or is_hero:
                 psf_layer: Literal["background", "mid", "foreground"] = "foreground"
-            elif mid_layer:
+            elif mid_layer or population == "cosmic":
                 psf_layer = "mid"
             else:
                 psf_layer = "background"
@@ -2520,6 +2626,73 @@ def _add_stars_from_catalog(
                     layer=psf_layer,
                     tuning=psf_tune,
                 )
+                if cfg.nebula_mode == NebulaMode.galaxy_streak:
+                    from dataclasses import replace
+
+                    size_u = float(rng.uniform(0.62, 1.42))
+                    if flux_val >= psf_tune.halo_flux_floor * 0.5:
+                        size_u *= float(rng.uniform(1.12, 1.75))
+                    elif flux_val >= psf_tune.halo_flux_floor * 0.1:
+                        size_u *= float(rng.uniform(0.88, 1.22))
+                    else:
+                        size_u *= float(rng.uniform(0.45, 0.78))
+                    psf_variety = replace(
+                        psf_variety,
+                        fwhm_scale=psf_variety.fwhm_scale * size_u,
+                        sigma_scale=psf_variety.sigma_scale * (0.86 + 0.20 * size_u),
+                        halo_scale=psf_variety.halo_scale
+                        * (0.82 + 0.35 * min(size_u, 1.4)),
+                    )
+                if is_hero:
+                    from dataclasses import replace as _replace_hero
+
+                    psf_variety = _replace_hero(
+                        psf_variety,
+                        style=StarPsfStyle.SATURATED,
+                        bloom_scale=max(float(psf_variety.bloom_scale), 1.25),
+                        halo_scale=max(float(psf_variety.halo_scale), 1.20),
+                        core_sat_scale=max(float(psf_variety.core_sat_scale), 1.15),
+                    )
+                elif not foreground_layer and not cluster_layer and psf_variety is not None:
+                    rare_bloom = False
+                    if getattr(cfg.features, "look_target", None) == LookTarget.cinematic:
+                        bright_tail = (
+                            "phot_mag" in catalog
+                            and float(catalog["phot_mag"][i])
+                            < float(cfg.features.mag_bright_lim) + 2.8
+                        )
+                        size_ok = radius >= 3 or size_name in ("medium", "large")
+                        if (size_ok or bright_tail) and rng.random() < 0.035:
+                            # Rare medium/large + bright-tail: softer bloom, not more points.
+                            from dataclasses import replace as _replace_bloom
+
+                            bloom_u = float(rng.uniform(1.18, 1.55))
+                            flux_val *= float(rng.uniform(1.08, 1.28))
+                            psf_variety = _replace_bloom(
+                                psf_variety,
+                                bloom_scale=float(psf_variety.bloom_scale) * bloom_u,
+                                halo_scale=float(psf_variety.halo_scale)
+                                * float(rng.uniform(1.10, 1.38)),
+                                fwhm_scale=float(psf_variety.fwhm_scale)
+                                * float(rng.uniform(1.05, 1.22)),
+                            )
+                            rare_bloom = True
+                    if (
+                        not rare_bloom
+                        and extinction_for_stars is not None
+                    ):
+                        # Slight bloom reduction in dense dust (non-heroes).
+                        dust_u = float(np.clip(1.0 - ext_t, 0.0, 1.0))
+                        if dust_u > 0.08:
+                            from dataclasses import replace as _replace_dust
+
+                            psf_variety = _replace_dust(
+                                psf_variety,
+                                bloom_scale=float(psf_variety.bloom_scale)
+                                * float(np.clip(1.0 - 0.22 * dust_u, 0.78, 1.0)),
+                                halo_scale=float(psf_variety.halo_scale)
+                                * float(np.clip(1.0 - 0.12 * dust_u, 0.85, 1.0)),
+                            )
             n_trail = max(1, int(trail_subframes))
             use_trail = (
                 n_trail > 1
@@ -2556,6 +2729,18 @@ def _add_stars_from_catalog(
                     layer=psf_layer,
                     variety=psf_variety,
                 )
+            if is_hero and hero_records is not None:
+                tint = np.clip(np.asarray(spectral, dtype=np.float64).reshape(-1)[:3], 0.0, None)
+                tsum = float(np.sum(tint)) + 1e-8
+                tint = tint / tsum
+                hero_records.append(
+                    HeroStarRecord(
+                        x=float(xf_coords[i]),
+                        y=float(yf_coords[i]),
+                        rgb=(float(tint[0]), float(tint[1]), float(tint[2])),
+                        flux=float(flux_val),
+                    )
+                )
         else:
             paint_star(img, int(np.round(xi_f)), int(np.round(yi_f)), radius, color, rng, galactic_lat=plat)
         if (
@@ -2586,14 +2771,41 @@ def _save_image(
     quality: int,
     *,
     dither_strength: float = 1.0,
+    copyright: str | None = None,
+    license: str | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     u8 = apply_blue_noise_dither_u8(img, strength=dither_strength)
     pil = Image.fromarray(u8, mode="RGB")
-    if fmt == "jpg":
-        pil.save(path, format="JPEG", quality=quality)
+    notice = (copyright or "").strip() or "unknown"
+    rights = (license or "").strip() or "unknown"
+    fmt_key = (fmt or "png").strip().lower()
+    if fmt_key in ("jpg", "jpeg"):
+        try:
+            exif = pil.getexif()
+            # 33432 = Copyright (IFD0); JPEG has no standard License tag.
+            exif[33432] = notice
+            pil.save(path, format="JPEG", quality=quality, exif=exif)
+        except Exception:
+            # Soft-fail: never block render on metadata write issues.
+            pil.save(path, format="JPEG", quality=quality)
+    elif fmt_key == "webp":
+        try:
+            exif = pil.getexif()
+            exif[33432] = notice
+            pil.save(path, format="WEBP", quality=quality, method=4, exif=exif)
+        except Exception:
+            try:
+                pil.save(path, format="WEBP", quality=quality, method=4)
+            except Exception:
+                pil.save(path, format="WEBP", quality=quality)
     else:
-        pil.save(path, format="PNG")
+        from PIL.PngImagePlugin import PngInfo
+
+        meta = PngInfo()
+        meta.add_text("Copyright", notice)
+        meta.add_text("License", rights)
+        pil.save(path, format="PNG", pnginfo=meta)
 
 
 def _enforce_horizontal_wrap(img: np.ndarray, *, seam_width: int | None = None) -> np.ndarray:
@@ -2613,16 +2825,18 @@ def render_single(
     generation_index: int,
     on_pass_complete: Callable[[str, float], None] | Callable[[str], None] | Callable[[], None] | None = None,
 ) -> tuple[dict[str, Path], dict[str, dict[str, int]]]:
+    cfg = finalize_render_config(cfg)
+
     def _notify_stage(stage: str, progress: float = 1.0) -> None:
         if on_pass_complete is None:
             return
         try:
-            on_pass_complete(stage, float(np.clip(progress, 0.0, 1.0)))  # type: ignore[misc]
+            on_pass_complete(stage, float(np.clip(progress, 0.0, 1.0)))  # type: ignore[call-arg]
         except TypeError:
             try:
-                on_pass_complete(stage)  # type: ignore[misc]
+                on_pass_complete(stage)  # type: ignore[call-arg]
             except TypeError:
-                on_pass_complete()  # type: ignore[operator]
+                on_pass_complete()  # type: ignore[call-arg]
 
     seed = (cfg.seed or 0) + generation_index
     seed_seq = np.random.SeedSequence(seed)
@@ -2651,14 +2865,6 @@ def render_single(
         )
     )
     _notify_stage("background", 1.0)
-    # #region agent log
-    import os as _os_dbg
-
-    if _os_dbg.environ.get("STK_ABLATION"):
-        _yy_bg = np.linspace(-1.0, 1.0, cfg.height, dtype=np.float64)[:, None]
-        _dw_bg = np.exp(-((_yy_bg**2) / 0.22))
-        _dbg_hist("canvas_after_background", canvas, _dw_bg, hypothesis_id="BG")
-    # #endregion
 
     stats = _empty_star_stats()
     stars_cosmic = np.zeros_like(canvas, dtype=HDR_DTYPE)
@@ -2666,7 +2872,9 @@ def render_single(
     stars_bg = np.zeros_like(canvas, dtype=HDR_DTYPE)
     stars_mid = np.zeros_like(canvas, dtype=HDR_DTYPE)
     stars_fg = np.zeros_like(canvas, dtype=HDR_DTYPE)
+    hero_records: list[HeroStarRecord] = []
     galactic: GalacticMorphology | None = None
+    core_void_mask: np.ndarray | None = None
     if cfg.features.galaxy_view and cfg.features.stars:
         _pk = _placement_kwargs(cfg.features)
         gen_phase = float(generation_index) * 0.173
@@ -2709,6 +2917,12 @@ def render_single(
             generation_phase=gen_phase,
             vertical_extent_strength=float(cfg.features.structure_vertical_extent),
             structure_host_latitude_scale=float(cfg.features.structure_host_latitude_scale),
+            structure_architecture_strength=float(cfg.features.structure_architecture_strength),
+            structure_band_core_drive=float(cfg.features.structure_band_core_drive),
+            structure_inner_dust_lane_strength=float(cfg.features.structure_inner_dust_lane_strength),
+            structure_type_competition=float(cfg.features.structure_type_competition),
+            lane_star_dropout_boost=float(cfg.features.lane_star_dropout_boost),
+            lane_star_dropout_power=float(cfg.features.lane_star_dropout_power),
             longitude_asymmetry_strength=float(cfg.features.longitude_asymmetry_strength),
             brutal_erasure_strength=float(cfg.features.extinction_brutal_erasure_strength),
             seam_guard_strength=float(cfg.features.seam_guard_strength),
@@ -2733,6 +2947,7 @@ def render_single(
         )
     density_scale = 1.0 + (0.36 if cfg.features.galaxy_view else 0.0)
     band_boost = 1.03 if cfg.features.galaxy_view else 1.0
+    bg_star_s = float(np.clip(cfg.features.background_star_density_scale, 0.05, 2.0))
     if cfg.features.stars and cfg.features.galaxy_view and cfg.features.cosmic_star_enabled:
         _notify_stage("stars cosmic", 0.0)
         cat_cosmic = sample_isotropic_cosmic_catalog(
@@ -2740,9 +2955,9 @@ def render_single(
             cfg.width,
             cfg.height,
             density_scale,
-            density_scale_mult=cfg.features.cosmic_star_density_scale,
+            density_scale_mult=float(cfg.features.cosmic_star_density_scale) * bg_star_s,
             attach_apparent_mag=cfg.features.photoreal_stars,
-            anchor_count=int(cfg.features.cosmic_anchor_count),
+            anchor_count=max(0, int(round(float(cfg.features.cosmic_anchor_count) * bg_star_s))),
         )
         stats_cosmic = _add_stars_from_catalog(
             stars_cosmic,
@@ -2755,8 +2970,6 @@ def render_single(
         )
         stats = _merge_star_stats(stats, stats_cosmic)
         np.multiply(stars_cosmic, 0.78, out=stars_cosmic, casting="unsafe")
-        canvas = _canvas_add_linear(canvas, stars_cosmic, galaxy_hdr=True)
-        _notify_stage("stars cosmic", 1.0)
     stars_above_nebula = bool(
         cfg.features.galaxy_view
         and cfg.features.stars
@@ -2769,6 +2982,15 @@ def render_single(
     )
     if cfg.features.galaxy_view and cfg.features.unified_linear_grade:
         stars_above_nebula = False
+    if (
+        not stars_above_nebula
+        and cfg.features.stars
+        and cfg.features.galaxy_view
+        and cfg.features.cosmic_star_enabled
+        and float(np.max(stars_cosmic)) > 1e-8
+    ):
+        canvas = _canvas_add_linear(canvas, stars_cosmic, galaxy_hdr=True)
+        _notify_stage("stars cosmic", 1.0)
     ism_dom = float(cfg.features.band_ism_dominance) if cfg.features.galaxy_view else 0.0
     radiance_unify = float(cfg.features.disk_radiance_unify_strength) if cfg.features.galaxy_view else 0.0
     photon_unify = float(cfg.features.photon_exposure_unify_strength) if cfg.features.galaxy_view else 0.0
@@ -2789,10 +3011,12 @@ def render_single(
     grade_neb_luma: np.ndarray | None = None
     morph_ism_rgb: np.ndarray | None = None
     morph_ism_luma: np.ndarray | None = None
-    morph_ism_layers: object | None = None
+    morph_ism_layers: MorphologyIsmLayers | None = None
     morph_puff_punch: np.ndarray | None = None
     morph_cont_guide: np.ndarray | None = None
     morph_gas_struct: np.ndarray | None = None
+    debug_neb_puff_mod: np.ndarray | None = None
+    debug_band_bleed_env: np.ndarray | None = None
     off_band_layer: np.ndarray | None = None
     band_hii_layer: np.ndarray | None = None
     if cfg.features.galaxy_view and cfg.features.nebula:
@@ -2839,7 +3063,7 @@ def render_single(
             )
             else 1.0
         )
-        phot_kw = dict(
+        phot_kw: dict[str, Any] = dict(
             attach_apparent_mag=cfg.features.photoreal_stars and cfg.features.galaxy_view,
             band_star_density_scale=(
                 cfg.features.band_star_density_scale * _gal_frac
@@ -2854,7 +3078,7 @@ def render_single(
             max_ultra_bright_stars=int(cfg.features.galactic_anchor_star_count),
             **_placement_kwargs(cfg.features),
         )
-        faint_cull_kw = dict(
+        faint_cull_kw: dict[str, Any] = dict(
             mag_faint_floor=cfg.features.resolved_faint_mag_floor,
             dropout_strength=cfg.features.resolved_faint_dropout,
             mag_faint=cfg.features.mag_faint_lim,
@@ -2874,7 +3098,7 @@ def render_single(
                 cfg.width,
                 cfg.height,
                 density_scale,
-                density_scale_mult=cfg.features.halo_star_density_scale,
+                density_scale_mult=float(cfg.features.halo_star_density_scale) * bg_star_s,
                 halo_lat_sigma=float(cfg.features.halo_lat_sigma),
                 attach_apparent_mag=bool(phot_kw["attach_apparent_mag"]),
                 max_ultra_bright_stars=4,
@@ -2934,6 +3158,19 @@ def render_single(
                 height=cfg.height,
                 **faint_cull_kw,
             )
+        if cfg.features.galaxy_view and getattr(cfg.features, "look_target", None) == LookTarget.cinematic:
+            cat_bg = cull_catalog_to_plane(
+                cat_bg,
+                rng_stars_bg,
+                width=cfg.width,
+                height=cfg.height,
+                disk_weight=disk_w if disk_w is not None else (
+                    galactic.disk_weight if galactic is not None else None
+                ),
+                gate_power=float(cfg.features.plane_star_gate_power),
+                keep_floor=0.035,
+                min_keep=max(64, int(cfg.width * cfg.height / 12000)),
+            )
         if (
             galactic is not None
             and cfg.features.galaxy_view
@@ -2976,9 +3213,29 @@ def render_single(
                 dropout_strength=float(cfg.features.disk_star_density_dropout),
                 mid_layer=False,
             )
+        if (
+            cfg.features.hero_star_enabled
+            and int(cfg.features.hero_star_count) > 0
+            and cfg.features.galaxy_view
+            and cfg.features.photoreal_stars
+            and "phot_mag" in cat_bg
+        ):
+            hero_idx = select_hero_indices(
+                cat_bg,
+                width=cfg.width,
+                height=cfg.height,
+                disk_weight=disk_w if disk_w is not None else (
+                    galactic.disk_weight if galactic is not None else None
+                ),
+                count=int(cfg.features.hero_star_count),
+                min_sep_frac=0.10,
+                off_plane_slots=2,
+                rng=rng_stars_bg,
+            )
+            attach_hero_flags(cat_bg, hero_idx)
         _notify_stage("stars background prep", 1.0)
         _notify_stage("stars background", 0.0)
-        _trail_kw = dict(
+        _trail_kw: dict[str, Any] = dict(
             trail_subframes=trail_subframes,
             trail_step_px=trail_step_px,
             trail_angle_rad=trail_angle_rad,
@@ -2997,6 +3254,7 @@ def render_single(
             disk_w=disk_w if cfg.features.galaxy_view else None,
             galactic_structure=galactic,
             progress_cb=lambda p: _notify_stage("stars background", p * 0.78),
+            hero_records=hero_records,
             **_trail_kw,
         )
         if cfg.features.galaxy_view:
@@ -3071,6 +3329,19 @@ def render_single(
                 attach_stellar_population_to_catalog(
                     cat_mid, galactic, cfg.width, cfg.height, rng_stars_mid
                 )
+            if getattr(cfg.features, "look_target", None) == LookTarget.cinematic:
+                cat_mid = cull_catalog_to_plane(
+                    cat_mid,
+                    rng_stars_mid,
+                    width=cfg.width,
+                    height=cfg.height,
+                    disk_weight=disk_w if disk_w is not None else (
+                        galactic.disk_weight if galactic is not None else None
+                    ),
+                    gate_power=float(cfg.features.plane_star_gate_power) * 0.92,
+                    keep_floor=0.04,
+                    min_keep=max(32, int(cfg.width * cfg.height / 18000)),
+                )
             if (
                 galactic is not None
                 and cfg.features.unresolved_deposit_primary
@@ -3119,9 +3390,12 @@ def render_single(
                 bg_scale = 1.14
             elif cfg.features.photoreal_stars and cfg.features.use_spectral_teffective:
                 bg_scale = 1.02
+            elif cfg.nebula_mode == NebulaMode.galaxy_streak:
+                bg_scale = 1.14 if stars_above_nebula else 1.02
             else:
                 bg_scale = 0.92 if cfg.features.photoreal_stars else 0.80
-            bg_scale *= float(np.clip(1.0 - 0.14 * ism_dom, 0.78, 1.0))
+            if cfg.nebula_mode != NebulaMode.galaxy_streak:
+                bg_scale *= float(np.clip(1.0 - 0.14 * ism_dom, 0.78, 1.0))
             np.multiply(stars_bg, bg_scale, out=stars_bg, casting="unsafe")
             if cfg.features.star_midlayer_scale > 1e-4:
                 mid_knee = 0.48 if stars_above_nebula else 0.72
@@ -3161,6 +3435,7 @@ def render_single(
         grain_strength = (
             cfg.features.background_texture_strength
             * cfg.features.unresolved_background_strength
+            * float(np.clip(0.55 + 0.45 * bg_star_s, 0.25, 1.0))
         )
         unresolved_rgb = unresolved_speckle_rgb(
             warmth=float(cfg.features.unresolved_spectral_warmth) * radiance_unify,
@@ -3181,6 +3456,8 @@ def render_single(
     gv_hdr = bool(cfg.features.galaxy_view)
 
     ext_paint_for_fg: np.ndarray | None = None
+    dark_rift_mask: np.ndarray | None = None
+    band_plan: BandPlan | None = None
     if cfg.features.nebula:
         _notify_stage("nebula clouds/dust", 0.08)
         if nebula_bundle is not None:
@@ -3225,11 +3502,15 @@ def render_single(
                     rng_nebula,
                     periodic_x=wrap_lon_blur_x,
                 )
-                morph_host = build_structure_morph_host(
-                    disk_w if disk_w is not None else galactic.disk_weight,
-                    galactic.vertical_extent,
-                    periodic_x=wrap_lon_blur_x,
-                )
+                arch = galactic.structure_architecture
+                if arch is not None:
+                    morph_host = arch.band_host
+                else:
+                    morph_host = build_structure_morph_host(
+                        disk_w if disk_w is not None else galactic.disk_weight,
+                        galactic.vertical_extent,
+                        periodic_x=wrap_lon_blur_x,
+                    )
                 morph_coupling = build_extinction_coupling_field(
                     morph_host,
                     galactic.dust_absorption_morph,
@@ -3237,6 +3518,12 @@ def render_single(
                     morph_puff_punch,
                     periodic_x=wrap_lon_blur_x,
                 )
+                if arch is not None:
+                    morph_coupling = np.clip(
+                        np.maximum(morph_coupling, arch.turbulence_drive * 0.72),
+                        0.0,
+                        1.28,
+                    )
                 ext_paint = build_morphology_extinction_transmission(
                     galactic,
                     void_floor=vf,
@@ -3327,16 +3614,47 @@ def render_single(
                         )
         else:
             ext_paint = extinction
-        ext_paint_for_fg = ext_paint
-        # #region agent log
-        if disk_w is not None:
-            _dbg_hist(
-                "ext_paint_transmission",
-                ext_paint,
+        if (
+            disk_w is not None
+            and float(cfg.features.dark_rift_strength) > 1e-6
+            and cfg.nebula_mode == NebulaMode.galaxy_streak
+        ):
+            lon_ref = galactic.lon_asymmetry if galactic is not None else None
+            dark_rift_mask = build_dark_rift_mask(
+                cfg.height,
+                cfg.width,
+                rng_nebula,
                 disk_w,
-                hypothesis_id="BG",
+                lon_ref,
+                coverage=float(cfg.features.dark_rift_coverage),
+                strength=float(cfg.features.dark_rift_strength),
+                periodic_x=wrap_lon_blur_x,
             )
-        # #endregion
+            vf_rift = float(getattr(cfg.features, "extinction_void_floor", 0.06))
+            ext_paint = apply_dark_rifts_to_extinction(
+                ext_paint,
+                dark_rift_mask,
+                void_floor=vf_rift,
+            )
+        # Soft extinction shoulders: transmission polarity (low = more attenuation) preserved.
+        if ext_paint is not None and cfg.nebula_mode == NebulaMode.galaxy_streak:
+            _ext_soft = _blur_separable_xy(ext_paint, passes=2, periodic_x=wrap_lon_blur_x)
+            ext_paint = np.clip(0.62 * ext_paint + 0.38 * _ext_soft, 0.04, 1.0)
+        ext_paint_for_fg = ext_paint
+        if (
+            disk_w is not None
+            and ext_paint is not None
+            and cfg.nebula_mode == NebulaMode.galaxy_streak
+        ):
+            band_plan = build_band_plan(
+                height=cfg.height,
+                width=cfg.width,
+                disk_w=disk_w,
+                ext_paint=ext_paint,
+                galactic=galactic,
+                rift_mask=dark_rift_mask,
+                periodic_x=wrap_lon_blur_x,
+            )
         if galactic is not None:
             galactic.merge_nebula_extinction(ext_paint)
         dust_primary = bool(
@@ -3363,7 +3681,7 @@ def render_single(
 
             _ve = galactic.vertical_extent if galactic is not None else None
             _surv = galactic.structure_survival if galactic is not None else None
-            wisp_gate, wisp_halo = wisp_vertical_bleed_gate(
+            wisp_gate, _wisp_halo_raw = wisp_vertical_bleed_gate(
                 cfg.height,
                 cfg.width,
                 plane_gate=plane_gate,
@@ -3372,9 +3690,10 @@ def render_single(
                 structure_survival=_surv,
                 periodic_x=wrap_lon_blur_x,
             )
+            # Annular wisp_halo caused horizontal worm/cellular streaks above/below the band.
+            wisp_halo = None
             bleed_gate = np.clip(np.maximum(bleed_gate, wisp_gate * 0.94), 0.0, 1.0)
         band_bleed_env: np.ndarray | None = None
-        core_void_mask: np.ndarray | None = None
         nebula_master_seed = int(seed) + int(generation_index) * 9973
         if cfg.nebula_mode == NebulaMode.galaxy_streak and disk_w is not None:
             from starsky_gen.structure_envelope import (
@@ -3427,6 +3746,10 @@ def render_single(
                 ),
                 periodic_x=wrap_lon_blur_x,
             )
+            from starsky_gen.dust_field import attenuate_row_comb
+
+            band_bleed_env = attenuate_row_comb(band_bleed_env, disk_w, strength=0.52)
+            debug_band_bleed_env = band_bleed_env
         morph_haze_scale = 1.0
         morph_gas_scale = 1.0
         morph_emit_scale = 1.0
@@ -3481,7 +3804,7 @@ def render_single(
         )
         fill_suppress = 1.0
         if dust_primary:
-            av_scale *= float(cfg.features.morphology_extinction_av_scale) * 0.82
+            av_scale *= float(cfg.features.morphology_extinction_av_scale) * 0.58
             fill_suppress = float(cfg.features.morphology_extinction_fill_suppress) * 0.88
         canvas = _apply_extinction_to_canvas(
             canvas,
@@ -3496,7 +3819,7 @@ def render_single(
         if float(cfg.features.morphology_missing_region_boost) > 1e-6:
             miss_boost = float(cfg.features.morphology_missing_region_boost)
             if dust_primary:
-                miss_boost *= 0.88
+                miss_boost *= 0.55
             canvas = apply_missing_region_extinction(
                 canvas,
                 ext_paint,
@@ -3533,7 +3856,7 @@ def render_single(
             morph_ism_luma = morph_ism_layers.luma
             if morph_puff_punch is None:
                 morph_puff_punch = morph_ism_layers.puff_punch_mask
-            body_s = neb_rad_scale * morph_haze_scale * (0.52 + 0.22 * ism_dom)
+            body_s = neb_rad_scale * morph_haze_scale * (0.58 + 0.26 * ism_dom)
             ism_gate = wisp_gate if wisp_gate is not None else (
                 plane_gate if plane_gate is not None else 1.0
             )
@@ -3545,19 +3868,37 @@ def render_single(
                 )
                 host = np.clip(soft_band_env, 0.0, 1.0)
                 ism_gate = np.clip(ism_gate * (0.52 + 0.48 * host), 0.0, 1.0)
-                if wisp_halo is not None:
-                    ism_gate = np.clip(ism_gate + wisp_halo * 0.42, 0.0, 1.35)
-            gate3 = ism_gate[..., np.newaxis]
+            gate3 = np.asarray(ism_gate, dtype=np.float64)[..., np.newaxis]
+            # Gold-only tight midplane gate (soft band still lets ~50% through off-plane).
+            if disk_w is not None:
+                dw_g = np.clip(np.asarray(disk_w, dtype=np.float64), 0.0, 1.0)
+                if dw_g.ndim == 1:
+                    dw_g = np.broadcast_to(dw_g[:, None], (cfg.height, cfg.width))
+                # Razor midplane only — shoulder latitudes must not get morph gold.
+                from starsky_gen.structure_envelope import midplane_gold_lat_gate
+
+                lat_g = midplane_gold_lat_gate(cfg.height, sigma=0.088, power=2.10)
+                if lat_g.shape != dw_g.shape:
+                    lat_g = np.broadcast_to(lat_g, dw_g.shape)
+                gold_disk = np.clip(
+                    dw_g**3.4 * np.asarray(soft_band_env, dtype=np.float64) ** 1.55 * lat_g,
+                    0.0,
+                    1.0,
+                )
+            else:
+                gold_disk = np.ones((cfg.height, cfg.width), dtype=np.float64)
+            gold_gate = gold_disk[..., np.newaxis]
             core_v = (
                 core_void_mask[..., np.newaxis]
                 if core_void_mask is not None
                 else 1.0
             )
+            # Midplane gold spine only (shoulders already razor-gated in morph layers).
             canvas = np.maximum(
                 0.0,
                 canvas
-                + morph_ism_layers.gold_emit_rgb * body_s * 0.36 * gate3 * core_v
-                + morph_ism_layers.white_rgb * body_s * 0.12 * gate3 * core_v,
+                + morph_ism_layers.gold_emit_rgb * body_s * 0.032 * gold_gate * core_v
+                + morph_ism_layers.white_rgb * body_s * 0.08 * gate3 * core_v,
             )
             absorb_l = np.clip(np.max(morph_ism_layers.absorption_rgb, axis=2), 0.0, 1.0)
             canvas = np.maximum(
@@ -3647,6 +3988,11 @@ def render_single(
                 periodic_x=wrap_lon_blur_x,
                 rng=np.random.default_rng(int(seed) + generation_index * 44017 + 0xC10D),
             )
+            from starsky_gen.dust_field import attenuate_row_comb
+
+            morph_gas_struct = attenuate_row_comb(
+                morph_gas_struct, disk_w, strength=0.55
+            )
             morph_cont_guide = _morphology_continuum_guide(
                 morph_gas_struct,
                 ext_paint,
@@ -3724,7 +4070,7 @@ def render_single(
                 if morph_ism_rgb is not None and morph_ism_luma is not None:
                     from starsky_gen.structure_envelope import build_fine_puff_field
 
-                    morph_gas_s = neb_rad_scale * (1.18 + 0.48 * ism_dom)
+                    morph_gas_s = neb_rad_scale * (0.98 + 0.36 * ism_dom)
                     struct_g = (
                         morph_gas_struct
                         if morph_gas_struct is not None
@@ -3738,15 +4084,24 @@ def render_single(
                         strength=1.0,
                         center_boost=1.0,
                     )
-                    puff_mod = np.clip(0.38 + 1.22 * puff_gas**1.06, 0.0, 1.85)
+                    from starsky_gen.dust_field import attenuate_row_comb
+
+                    puff_gas = attenuate_row_comb(puff_gas, disk_w, strength=0.72)
+                    puff_mod = np.clip(0.52 + 0.38 * puff_gas**1.04, 0.0, 1.25)
+                    debug_neb_puff_mod = puff_mod
                     morph_lu = np.clip(morph_ism_luma, 0.0, 1.0)
                     morph_mix = (
                         morph_ism_rgb
                         * morph_gas_s
                         * struct_g[..., np.newaxis]
-                        * (0.72 + 0.28 * puff_mod[..., np.newaxis])
+                        * (0.88 + 0.12 * puff_mod[..., np.newaxis])
                     )
-                    if disk_chroma_ref is not None:
+                    if cfg.nebula_mode == NebulaMode.galaxy_streak:
+                        _warm_tr = np.array([1.06, 1.0, 0.84], dtype=np.float64)
+                        morph_mix = morph_lu[..., np.newaxis] * _warm_tr.reshape(
+                            1, 1, 3
+                        ) * (0.62 + 0.38 * struct_g[..., np.newaxis]) + morph_mix * 0.22
+                    elif disk_chroma_ref is not None:
                         _tr = disk_chroma_ref / max(
                             float(
                                 np.dot(
@@ -3775,21 +4130,7 @@ def render_single(
                         proc_tail = proc_tail * (
                             0.42 + 0.58 * morph_gas_struct[..., np.newaxis]
                         )
-                    neb_gas = morph_mix * morph_w * 1.02 + proc_tail * 0.34
-                    if wisp_halo is not None and morph_cont_guide is not None:
-                        wisp_rgb = np.clip(
-                            morph_cont_guide[..., np.newaxis]
-                            * np.array([0.94, 0.90, 0.86], dtype=np.float64),
-                            0.0,
-                            1.0,
-                        )
-                        neb_gas = neb_gas + (
-                            wisp_rgb
-                            * wisp_halo[..., np.newaxis]
-                            * neb_rad_scale
-                            * morph_gas_scale
-                            * 0.14
-                        )
+                    neb_gas = morph_mix * morph_w * 0.92 + proc_tail * 0.26
                 else:
                     neb_gas *= (
                         proc_w
@@ -3818,15 +4159,19 @@ def render_single(
                     if soft_band_env is not None
                     else np.clip(disk_w, 0.0, 1.0)
                 )
+                _plane_vis = np.clip(np.asarray(disk_w, dtype=np.float64), 0.0, 1.0) ** 1.35
                 gas_visibility = np.clip(
                     np.maximum(
                         gas_visibility,
-                        (0.44 + 0.56 * gas_rel_vis) * gas_presence * host_vis,
+                        (0.32 + 0.48 * gas_rel_vis)
+                        * gas_presence
+                        * host_vis
+                        * np.clip(_plane_vis * 3.2, 0.08, 1.0),
                     ),
                     0.0,
                     1.0,
                 )
-                neb_gas = neb_gas * (1.22 + 0.18 * morph_gas_scale)
+                neb_gas = neb_gas * (0.94 + 0.08 * morph_gas_scale)
                 if morph_gas_struct is not None and galactic is not None:
                     puff_clear = np.clip(
                         (1.0 - galactic.dust_absorption_morph) ** 1.02, 0.06, 1.0
@@ -3835,12 +4180,6 @@ def render_single(
                         morph_gas_struct * 0.72 + puff_clear * 0.48, 0.0, 1.0
                     )
                     puff_boost = puff_vis * gas_presence * 1.05
-                    if wisp_halo is not None:
-                        puff_boost = np.clip(
-                            np.maximum(puff_boost, puff_vis * wisp_halo * 0.72),
-                            0.0,
-                            1.0,
-                        )
                     gas_visibility = np.clip(
                         np.maximum(gas_visibility, puff_boost),
                         0.0,
@@ -3866,9 +4205,18 @@ def render_single(
             neb_gas = attenuate_rgb_column_comb(
                 neb_gas,
                 disk_w,
-                strength=0.62 if dust_primary else 0.48,
+                strength=0.78 if dust_primary else 0.58,
                 periodic_x=wrap_lon_blur_x,
             )
+            neb_gas = attenuate_rgb_row_comb(
+                neb_gas,
+                disk_w,
+                strength=0.72 if dust_primary else 0.55,
+            )
+            _plane_ramp = np.clip(np.asarray(disk_w, dtype=np.float64), 0.0, 1.0) ** 0.68
+            _sky_neb = np.clip(0.18 + 0.82 * _plane_ramp, 0.12, 1.0)
+            neb_gas = neb_gas * _sky_neb[..., np.newaxis]
+            gas_visibility = gas_visibility * _sky_neb
             chroma_tgt = disk_chroma_ref
             if chroma_tgt is None and dust_primary:
                 chroma_tgt = disk_chroma_from_star_layer(
@@ -3892,14 +4240,18 @@ def render_single(
                 strength=gas_occ,
             )
         canvas = composite_add_gas(canvas, neb_gas, visibility=gas_visibility)
-        # #region agent log
-        import os as _os_gas
-
-        if _os_gas.environ.get("STK_ABLATION") and disk_w is not None:
-            _dbg_hist("canvas_after_gas", canvas, disk_w, hypothesis_id="A")
-            if ext_paint is not None:
-                _dbg_hist("ext_paint", ext_paint, disk_w, hypothesis_id="A")
-        # #endregion
+        if cfg.nebula_mode == NebulaMode.galaxy_streak and disk_w is not None:
+            _dw_s = np.clip(np.asarray(disk_w, dtype=np.float64), 0.0, 1.0)
+            _shoulder = np.clip(_dw_s**0.62, 0.0, 1.0)
+            _amb = _shoulder[..., np.newaxis] * np.array(
+                [0.042, 0.038, 0.034], dtype=np.float64
+            )
+            _lu_c = rec709_luma(canvas)
+            canvas = np.clip(
+                canvas + _amb * np.clip(1.0 - _lu_c[..., np.newaxis] * 1.35, 0.12, 1.0),
+                0.0,
+                1.0,
+            )
         if cfg.nebula_mode == NebulaMode.galaxy_streak:
             emit_luma = np.mean(neb_emit, axis=2)
             emit_peaks = np.max(neb_emit, axis=2)
@@ -4065,21 +4417,21 @@ def render_single(
             )
             haze_s = float(cfg.features.nebula_haze_strength) * morph_haze_scale * cont_sup * 0.88
             if dust_primary:
-                haze_s *= 0.36
-            haze_warm = 0.55 if dust_primary else 1.0
-            gold_h = np.array([0.48, 0.46, 0.40], dtype=np.float64) * haze_warm
-            mag_h = np.array([0.32, 0.09, 0.24], dtype=np.float64) * (0.65 if dust_primary else 1.0)
+                haze_s *= 0.18  # cinematic: keep ISM haze subtle vs midplane structure
+            haze_warm = 0.36 if dust_primary else 1.0
+            gold_h = np.array([0.40, 0.39, 0.37], dtype=np.float64) * haze_warm
+            mag_h = np.array([0.14, 0.12, 0.13], dtype=np.float64) * (0.38 if dust_primary else 0.65)
             cool_scatter = np.array([0.09, 0.10, 0.12], dtype=np.float64)
             gc = gas_mask[..., np.newaxis]
             canvas = _canvas_add_linear(
                 canvas,
                 (
-                    (haze * band_h)[..., None] * gold_h * (0.020 if stars_above_nebula else 0.030)
-                    + (haze * band_h)[..., None] * cool_scatter * 0.012
+                    (haze * band_h)[..., None] * gold_h * (0.014 if stars_above_nebula else 0.024)
+                    + (haze * band_h)[..., None] * cool_scatter * (0.008 if dust_primary else 0.012)
                     + (band_h * core_v2 * axis_carve)[..., None]
                     * np.array([0.08, 0.078, 0.076], dtype=np.float64)
-                    * 0.012
-                    + (np.clip(haze, 0.0, 1.0) ** 1.02 * band_h)[..., None] * mag_h * 0.006
+                    * (0.008 if dust_primary else 0.012)
+                    + (np.clip(haze, 0.0, 1.0) ** 1.02 * band_h)[..., None] * mag_h * 0.004
                 )
                 * haze_s
                 * gc,
@@ -4103,15 +4455,15 @@ def render_single(
                 bleed_gate=bg,
                 plane_gate=pg,
             )
-            gold_band_rgb = np.array([0.52, 0.46, 0.36], dtype=np.float64)
-            white_band_rgb = np.array([0.76, 0.74, 0.70], dtype=np.float64)
+            gold_band_rgb = np.array([0.48, 0.44, 0.40], dtype=np.float64)
+            white_band_rgb = np.array([0.74, 0.73, 0.71], dtype=np.float64)
             cloud_mix = np.clip(0.44 + 0.56 * band_cloud, 0.0, 1.0)
             warm_white = gold_band_rgb * (1.0 - cloud_mix[..., None]) + white_band_rgb * cloud_mix[..., None]
             canvas = _canvas_add_linear(
                 canvas,
                 (band_cloud * plane_bw * core_v2 * axis_carve)[..., None]
                 * warm_white
-                * ((0.028 if stars_above_nebula else 0.034) if dust_primary else (0.072 if stars_above_nebula else 0.094))
+                * ((0.018 if stars_above_nebula else 0.024) if dust_primary else (0.072 if stars_above_nebula else 0.094))
                 * haze_s
                 * gc,
                 galaxy_hdr=gv_hdr,
@@ -4342,7 +4694,7 @@ def render_single(
             if ext_paint_for_fg is not None:
                 patch_s = float(cfg.features.band_dark_patch_strength)
                 if dust_primary:
-                    patch_s *= 0.78
+                    patch_s *= 0.42
                 canvas = _apply_band_dark_patches(
                     canvas,
                     ext_paint_for_fg,
@@ -4395,6 +4747,7 @@ def render_single(
             periodic_x=wrap_lon_blur_x,
             texture_strength=grain_strength,
             speckle_scale=0.95,
+            sky_density_scale=bg_star_s,
         )
 
     if cfg.features.stars:
@@ -4530,7 +4883,7 @@ def render_single(
             density_sharp = np.clip(disk_w, 0.0, 1.0)
         elif ext_paint_for_fg is not None:
             density_sharp = np.clip(
-                grade_neb_luma * 0.72 + ext_paint_for_fg * 0.28,
+                np.asarray(density_sharp, dtype=np.float64) * 0.72 + ext_paint_for_fg * 0.28,
                 0.0,
                 1.0,
             )
@@ -4560,31 +4913,6 @@ def render_single(
             neb_luma=grade_neb_luma,
         )
         if disk_w is not None and cfg.nebula_mode == NebulaMode.galaxy_streak:
-            # #region agent log
-            _lu_pre = rec709_luma(np.maximum(canvas, 0.0))
-            _dwf = np.clip(disk_w, 0.0, 1.0)
-            if _dwf.ndim == 1:
-                _dwf = _dwf[:, None]
-            _bm = _dwf[:, 0] > 0.35
-            _pre_fin: dict[str, float] = {}
-            if bool(np.any(_bm)):
-                _b = _lu_pre[_bm]
-                _pre_fin = {
-                    "band_p50": float(np.percentile(_b, 50)),
-                    "band_p95": float(np.percentile(_b, 95)),
-                    "band_std": float(np.std(_b)),
-                }
-            if ext_paint_for_fg is not None and bool(np.any(_bm)):
-                _pre_fin["ext_mean_band"] = float(
-                    np.mean(np.clip(ext_paint_for_fg, 0.0, 1.0)[_bm])
-                )
-            _dbg_log(
-                "F",
-                "generator.py:pre_finalize",
-                "linear canvas before finalize",
-                _pre_fin,
-            )
-            # #endregion
             canvas = finalize_band_linear_hdr(
                 canvas,
                 disk_w,
@@ -4597,7 +4925,7 @@ def render_single(
         lane_edge = None
         if ext_paint_for_fg is not None:
             lane_edge = _extinction_gradient_mag(ext_paint_for_fg, periodic_x=wrap_lon_blur_x)
-        _display_kw = dict(
+        _display_kw: dict[str, Any] = dict(
             neb_luma=grade_neb_luma,
             lane_edge=lane_edge,
             periodic_x=wrap_lon_blur_x,
@@ -4625,14 +4953,6 @@ def render_single(
                 lane_edge=lane_edge,
                 inject_noise_fn=_inject_post_isp_noise,
             )
-            # #region agent log
-            _dbg_log(
-                "D",
-                "generator.py:post_grade_pipeline",
-                "after linear grade (pre-stars)",
-                _dbg_band_stats(canvas, disk_w),
-            )
-            # #endregion
             # Nebula HDR already went through morphology extinction; re-modulating the
             # graded display canvas here washed out stars and the band (see log G).
             if (
@@ -4650,12 +4970,6 @@ def render_single(
                     canvas
                     * (1.0 - _pl[..., np.newaxis] + _pl[..., np.newaxis] * _ext_mod[..., np.newaxis]),
                 )
-                _dbg_log(
-                    "G",
-                    "generator.py:post_grade_extinction",
-                    "extinction modulation on display canvas",
-                    _dbg_band_stats(canvas, disk_w),
-                )
             elif ext_paint_for_fg is not None and stars_above_nebula and disk_w is not None:
                 _pl = np.clip(np.asarray(disk_w, dtype=np.float64), 0.0, 1.0)
                 if _pl.ndim == 1:
@@ -4669,12 +4983,6 @@ def render_single(
                     canvas
                     * (1.0 - _pl[..., np.newaxis] + _pl[..., np.newaxis] * _ext_mod[..., np.newaxis]),
                 )
-                _dbg_log(
-                    "G",
-                    "generator.py:post_grade_extinction",
-                    "relative extinction on display canvas (stars above nebula)",
-                    _dbg_band_stats(canvas, disk_w),
-                )
                 if not cfg.features.galactic_band_color_grade:
                     canvas = _apply_extinction_band_display_wash(
                         canvas,
@@ -4682,11 +4990,101 @@ def render_single(
                         disk_w,
                         strength=float(cfg.features.band_dark_patch_strength) * 1.05,
                     )
+            if (
+                cfg.features.galactic_band_color_grade
+                and cfg.features.galaxy_view
+                and disk_w is not None
+                and ext_paint_for_fg is not None
+                and cfg.nebula_mode == NebulaMode.galaxy_streak
+            ):
+                _hii_hint = None
+                if band_hii_layer is not None and float(np.max(band_hii_layer)) > 1e-8:
+                    _hii_hint = rec709_luma(np.maximum(band_hii_layer, 0.0))
+                _dust_m = None
+                _sf_m = None
+                _void_m = None
+                _turb_m = None
+                if galactic is not None:
+                    _dust_m = galactic.dust_absorption_morph
+                    _sf_m = galactic.star_formation
+                    _void_m = galactic.void_mask
+                    _turb_m = galactic.latent_turb
+                _lane_arch = None
+                _shell_arch = None
+                _dens_g = None
+                _surv = None
+                _gold_pop = None
+                if galactic is not None:
+                    _dens_g = galactic.stellar_density
+                    _surv = galactic.structure_survival
+                    _gold_pop = galactic.gold_population_weight
+                    if galactic.structure_architecture is not None:
+                        _lane_arch = galactic.structure_architecture.dust_lane_weight
+                        _shell_arch = galactic.structure_architecture.puff_shell_weight
+                canvas = apply_galactic_band_color_grade(
+                    canvas,
+                    disk_w,
+                    ext_paint_for_fg,
+                    dust_absorption=_dust_m,
+                    star_formation=_sf_m,
+                    void_mask=_void_m,
+                    latent_turb=_turb_m,
+                    hii_hint=_hii_hint,
+                    dust_lane_weight=_lane_arch,
+                    puff_shell_weight=_shell_arch,
+                    stellar_density=_dens_g,
+                    structure_survival=_surv,
+                    gold_population=_gold_pop,
+                    strength=float(cfg.features.galactic_band_color_grade_strength),
+                    inner_bias=float(cfg.features.galactic_band_color_inner_bias),
+                    dust_black_strength=float(cfg.features.galactic_band_dust_black_strength),
+                    gas_fluff_strength=float(cfg.features.galactic_band_gas_fluff_strength),
+                    micro_display_strength=float(
+                        cfg.features.galactic_band_micro_display_strength
+                    )
+                    * 0.55,
+                    separation_strength=float(cfg.features.galactic_band_separation_strength)
+                    * 0.18,
+                    multi_scatter_strength=0.16,
+                    hii_strength=0.11,
+                    void_turbulence=0.22,
+                    anti_blue=0.22,
+                    gas_texture=morph_gas_struct,
+                    periodic_x=wrap_lon_blur_x,
+                    blur_fn=_blur_separable_xy,
+                    rng=rng_post,
+                )
+                if morph_gas_struct is not None and disk_w is not None:
+                    canvas = _reinforce_morph_canvas_texture(
+                        canvas,
+                        morph_gas_struct,
+                        disk_w,
+                        plane_gate=plane_gate,
+                        strength=0.32,
+                    )
+                # After morph reinforce: strip HF gold dashes that grade kill missed.
+                if disk_w is not None:
+                    canvas = suppress_gold_chroma_islands(
+                        canvas,
+                        disk_w,
+                        strength=1.0,
+                        periodic_x=wrap_lon_blur_x,
+                        blur_fn=_blur_separable_xy,
+                    )
+                canvas = apply_band_display_highlight_cap(
+                    canvas,
+                    disk_w,
+                    knee=0.44,
+                    cap=float(cfg.features.band_display_peak_cap),
+                )
             if cfg.features.stars:
                 yy_band = np.linspace(-1.0, 1.0, cfg.height, dtype=np.float64)[:, None]
-                band_gate = np.exp(-((yy_band**2) / 0.50)) * np.clip(disk_w, 0.0, 1.0)
+                band_gate = np.exp(-((yy_band**2) / 0.58)) * np.clip(disk_w, 0.0, 1.0)
                 star_stack = np.maximum(0.0, stars_bg + stars_mid * 0.92 + stars_fg)
-                if disk_w is not None:
+                if (
+                    disk_w is not None
+                    and cfg.nebula_mode != NebulaMode.galaxy_streak
+                ):
                     plane_scale = float(cfg.features.band_star_plane_scale) * float(
                         np.clip(1.12 - 0.42 * ism_dom, 0.35, 1.0)
                     )
@@ -4697,62 +5095,48 @@ def render_single(
                     star_stack = apply_shared_photon_exposure(
                         star_stack, disk_exposure, disk_w, strength=photon_unify * 0.92
                     )
-                # #region agent log
-                def _star_luma_stats(layer: np.ndarray, label: str) -> None:
-                    lu = rec709_luma(np.maximum(layer, 0.0))
-                    pos = lu[lu > 1e-6]
-                    if int(pos.size) < 16:
-                        return
-                    band_m = band_gate > 0.22 if disk_w is not None else np.ones_like(lu, dtype=bool)
-                    bp = lu[band_m]
-                    _dbg_log(
-                        "WASH",
-                        "generator.py:star_display_path",
-                        label,
-                        {
-                            "p50": float(np.percentile(pos, 50)),
-                            "p95": float(np.percentile(pos, 95)),
-                            "max": float(np.max(pos)),
-                            "band_p95": float(np.percentile(bp, 95)) if bp.size > 16 else 0.0,
-                            "ism_dom": float(ism_dom),
-                        },
-                    )
-
-                _star_luma_stats(star_stack, "star_stack_pre_norm")
-                # #endregion
-                star_stack = normalize_star_stack_luma_preserve_chroma(
-                    star_stack, percentile=98.8, target=0.90
+                _norm_p = 97.2 if cfg.nebula_mode == NebulaMode.galaxy_streak else 98.8
+                _norm_t = 0.76 if cfg.nebula_mode == NebulaMode.galaxy_streak else 0.90
+                _norm_kw = (
+                    {"scale_lo": 0.40, "scale_hi": 1.75}
+                    if cfg.nebula_mode == NebulaMode.galaxy_streak
+                    else {}
                 )
-                # #region agent log
-                _star_luma_stats(star_stack, "star_stack_post_norm")
-                # #endregion
+                star_stack = normalize_star_stack_luma_preserve_chroma(
+                    star_stack, percentile=_norm_p, target=_norm_t, **_norm_kw
+                )
                 if ext_paint_for_fg is not None and not stars_above_nebula:
                     ext_k = np.clip(np.asarray(ext_paint_for_fg, dtype=np.float64), 0.0, 1.0)
                     star_stack = star_stack * np.clip(
                         0.38 + 0.62 * ext_k**0.92, 0.28, 1.0
                     )[..., np.newaxis]
-                    # #region agent log
-                    _star_luma_stats(star_stack, "star_stack_post_ext")
-                    # #endregion
-                elif ext_paint_for_fg is not None and stars_above_nebula:
+                elif (
+                    ext_paint_for_fg is not None
+                    and stars_above_nebula
+                    and cfg.nebula_mode != NebulaMode.galaxy_streak
+                ):
                     rel_clear = band_relative_clearance(
                         ext_paint_for_fg, disk_w, min_clear=0.12, power=0.95
                     )
                     star_stack = star_stack * np.clip(
-                        0.44 + 0.56 * rel_clear, 0.38, 1.0
+                        0.74 + 0.26 * rel_clear, 0.68, 1.0
                     )[..., np.newaxis]
-                    # #region agent log
-                    _star_luma_stats(star_stack, "star_stack_post_ext_rel")
-                    # #endregion
                 spectral = bool(cfg.features.use_spectral_teffective)
                 desat_mul = 1.0 if use_star_display_desat else 0.0
+                if cfg.nebula_mode == NebulaMode.galaxy_streak:
+                    desat_mul = 0.0
                 faint_desat = float(cfg.features.faint_star_chroma_desat) * (0.5 if spectral else 1.0) * desat_mul
-                band_adapt = float(cfg.features.star_band_chroma_adapt) * (0.2 if spectral else 1.0) * desat_mul
-                band_desat = float(cfg.features.star_band_chroma_desat) * (0.5 if spectral else 1.0) * desat_mul
+                band_adapt = float(cfg.features.star_band_chroma_adapt) * (0.15 if spectral else 1.0) * desat_mul
+                band_desat = float(cfg.features.star_band_chroma_desat) * (0.35 if spectral else 1.0) * desat_mul
                 peak_clamp = float(cfg.features.star_peak_soft_clamp) * (0.45 if spectral else 1.0)
                 stretch_g = float(cfg.features.star_display_stretch_gain)
                 out_gain = 1.10
-                if cfg.features.split_star_match_scene_tone and radiance_unify > 1e-4:
+                _match_scene = (
+                    cfg.features.split_star_match_scene_tone
+                    and radiance_unify > 1e-4
+                    and cfg.nebula_mode != NebulaMode.galaxy_streak
+                )
+                if _match_scene:
                     stretch_g = matched_star_display_stretch_gain(
                         star_stack,
                         canvas,
@@ -4760,6 +5144,11 @@ def render_single(
                         stretch_g,
                     )
                     out_gain = float(np.clip(1.0 + 0.08 * radiance_unify, 0.92, 1.06))
+                elif cfg.nebula_mode == NebulaMode.galaxy_streak:
+                    stretch_g = float(cfg.features.star_display_stretch_gain)
+                    if stretch_g < 1.0:
+                        stretch_g = 10.0
+                    out_gain = 1.08
                 star_disp = _hdr_stars_to_display(
                     star_stack,
                     disk_w,
@@ -4769,32 +5158,97 @@ def render_single(
                     display_cap=cfg.features.star_display_white_cap,
                     output_gain=out_gain,
                 )
-                star_add = float(cfg.features.star_composite_add_scale) * float(
-                    np.clip(1.0 - 0.16 * ism_dom, 0.72, 1.0)
-                )
-                star_bright = float(cfg.features.star_band_brightness_scale) * float(
-                    np.clip(1.0 - 0.20 * ism_dom, 0.72, 1.0)
-                )
-                blend_in_band = float(np.clip(0.38 - 0.10 * ism_dom, 0.24, 0.42))
-                canvas = composite_stars_over_display_canvas(
-                    canvas,
-                    star_disp,
-                    band_gate,
-                    add_scale=min(0.98, star_add),
-                    band_chroma_desat=band_desat,
-                    band_brightness_scale=star_bright,
-                    band_chroma_adapt=band_adapt,
-                    peak_soft_clamp=peak_clamp,
-                    max_blend_in_band=blend_in_band,
-                )
-                # #region agent log
-                _dbg_log(
-                    "E",
-                    "generator.py:post_star_composite",
-                    "after star composite",
-                    _dbg_band_stats(canvas, disk_w),
-                )
-                # #endregion
+                star_bloom_s = float(cfg.features.star_layer_bloom_strength)
+                if star_bloom_s > 1e-6 and stars_above_nebula:
+                    star_disp = apply_tri_scale_bloom(
+                        star_disp,
+                        disk_w,
+                        strength=star_bloom_s,
+                        threshold=float(cfg.features.bloom_threshold),
+                        mix_tight=float(cfg.features.bloom_mix_tight),
+                        mix_mid=float(cfg.features.bloom_mix_mid) * 0.85,
+                        mix_wide=float(cfg.features.bloom_mix_wide) * 0.55,
+                        periodic_x=wrap_lon_blur_x,
+                    )
+                if cfg.nebula_mode == NebulaMode.galaxy_streak:
+                    _lu_sd = rec709_luma(star_disp)
+                    star_disp = np.clip(
+                        _lu_sd[..., np.newaxis]
+                        + (star_disp - _lu_sd[..., np.newaxis]) * 1.52,
+                        0.0,
+                        1.0,
+                    )
+                if cfg.nebula_mode == NebulaMode.galaxy_streak:
+                    star_add = float(cfg.features.star_composite_add_scale) * 0.88
+                    star_bright = 0.92
+                    blend_in_band = 0.84
+                    peak_clamp = min(peak_clamp, 0.06)
+                else:
+                    star_add = float(cfg.features.star_composite_add_scale) * float(
+                        np.clip(1.0 - 0.16 * ism_dom, 0.72, 1.0)
+                    )
+                    star_bright = float(cfg.features.star_band_brightness_scale) * float(
+                        np.clip(1.0 - 0.20 * ism_dom, 0.72, 1.0)
+                    )
+                    blend_in_band = float(np.clip(0.38 - 0.10 * ism_dom, 0.24, 0.42))
+                _canvas_pre_stars = canvas.copy()
+                # Mild lane attenuation (midplane glow allowed — do not crush core).
+                if (
+                    band_plan is not None
+                    and cfg.nebula_mode == NebulaMode.galaxy_streak
+                    and float(cfg.features.post_star_lane_protect_strength) > 1e-6
+                ):
+                    _lane_att = np.clip(
+                        1.0 - 0.32 * np.clip(band_plan.protect_mask, 0.0, 1.0) ** 0.90,
+                        0.45,
+                        1.0,
+                    )
+                    star_disp = star_disp * _lane_att[..., np.newaxis]
+                if cfg.nebula_mode == NebulaMode.galaxy_streak:
+                    canvas = composite_stars_over_display_canvas(
+                        canvas,
+                        star_disp,
+                        band_gate,
+                        add_scale=float(star_add),
+                        band_chroma_desat=0.0,
+                        band_brightness_scale=float(star_bright),
+                        band_chroma_adapt=0.0,
+                        peak_soft_clamp=peak_clamp,
+                        max_blend_in_band=blend_in_band,
+                    )
+                else:
+                    canvas = composite_stars_over_display_canvas(
+                        canvas,
+                        star_disp,
+                        band_gate,
+                        add_scale=min(0.98, star_add),
+                        band_chroma_desat=band_desat,
+                        band_brightness_scale=star_bright,
+                        band_chroma_adapt=band_adapt,
+                        peak_soft_clamp=peak_clamp,
+                        max_blend_in_band=blend_in_band,
+                    )
+                if (
+                    stars_above_nebula
+                    and float(cfg.features.post_star_lane_protect_strength) > 1e-6
+                    and (band_plan is not None or ext_paint_for_fg is not None)
+                ):
+                    if band_plan is None and disk_w is not None and ext_paint_for_fg is not None:
+                        band_plan = build_band_plan(
+                            height=cfg.height,
+                            width=cfg.width,
+                            disk_w=disk_w,
+                            ext_paint=ext_paint_for_fg,
+                            galactic=galactic,
+                            rift_mask=dark_rift_mask,
+                            periodic_x=wrap_lon_blur_x,
+                        )
+                    if band_plan is not None:
+                        canvas = apply_band_plan_lane_protect(
+                            canvas,
+                            band_plan,
+                            strength=float(cfg.features.post_star_lane_protect_strength),
+                        )
         else:
             _medium_only_grade = bool(cfg.features.galaxy_view and not cfg.features.stars)
             if cfg.features.optics_before_tone_map and use_linear_grade:
@@ -4832,15 +5286,19 @@ def render_single(
                         star_overlay_pending=_medium_only_grade,
                         **_display_kw,
                     )
+        if hero_records and float(cfg.features.hero_lens_ghost_strength) > 1e-6:
+            canvas = paint_hero_lens_ghosts(
+                canvas,
+                hero_records,
+                rng_post,
+                strength=float(cfg.features.hero_lens_ghost_strength),
+                periodic_x=wrap_lon_blur_x,
+            )
         if (
             bool(cfg.features.off_band_late_composite)
             and float(cfg.features.off_band_emission_strength) > 1e-6
         ):
-            lu_pre = rec709_luma(canvas)
-            _band_pre_hii = _dbg_band_stats(canvas, disk_w)
             _late_band_hii = band_hii_layer
-            if bool(cfg.features.galactic_band_color_grade):
-                _late_band_hii = None
             canvas = _composite_red_hii_late(
                 canvas,
                 off_band_layer,
@@ -4849,162 +5307,92 @@ def render_single(
                 periodic_x=wrap_lon_blur_x,
                 disk_w=disk_w,
             )
-            # #region agent log
-            _post = _dbg_band_stats(canvas, disk_w)
-            _dbg_log(
-                "E",
-                "generator.py:post_late_hii",
-                "late H II composite delta",
-                {
-                    "pre": _band_pre_hii,
-                    "post": _post,
-                    "band_p50_delta": _post.get("band_p50", 0.0)
-                    - _band_pre_hii.get("band_p50", 0.0),
-                },
-            )
-            # #endregion
-        if use_display_finish and cfg.features.film_grain_strength > 1e-6:
+        # Cinematic: no late grain on final composite (micro-detail stays in continuum only).
+        _grain = float(cfg.features.film_grain_strength)
+        if getattr(cfg.features, "look_target", None) == LookTarget.cinematic:
+            _grain = 0.0
+        if use_display_finish and _grain > 1e-6:
             canvas = apply_film_grain_display(
                 canvas,
                 rng_post,
-                cfg.features.film_grain_strength,
+                _grain,
                 periodic_x=wrap_lon_blur_x,
             )
-        if (
-            cfg.features.galaxy_view
-            and disk_w is not None
-            and cfg.nebula_mode == NebulaMode.galaxy_streak
-        ):
-            canvas = apply_band_display_highlight_cap(
-                canvas,
-                disk_w,
-                knee=0.40,
-                cap=float(cfg.features.band_display_peak_cap),
-            )
-        if (
-            cfg.features.galactic_band_color_grade
-            and cfg.features.galaxy_view
-            and disk_w is not None
-            and ext_paint_for_fg is not None
-            and cfg.nebula_mode == NebulaMode.galaxy_streak
-        ):
-            _hii_hint = None
-            if band_hii_layer is not None and float(np.max(band_hii_layer)) > 1e-8:
-                _hii_hint = rec709_luma(np.maximum(band_hii_layer, 0.0))
-            _dust_m = None
-            _sf_m = None
-            _void_m = None
-            _turb_m = None
-            if galactic is not None:
-                _dust_m = galactic.dust_absorption_morph
-                _sf_m = galactic.star_formation
-                _void_m = galactic.void_mask
-                _turb_m = galactic.latent_turb
-            canvas = apply_galactic_band_color_grade(
-                canvas,
-                disk_w,
-                ext_paint_for_fg,
-                dust_absorption=_dust_m,
-                star_formation=_sf_m,
-                void_mask=_void_m,
-                latent_turb=_turb_m,
-                hii_hint=_hii_hint,
-                strength=float(cfg.features.galactic_band_color_grade_strength),
-                dust_black_strength=float(cfg.features.galactic_band_dust_black_strength),
-                gas_fluff_strength=float(cfg.features.galactic_band_gas_fluff_strength),
-                micro_display_strength=float(
-                    cfg.features.galactic_band_micro_display_strength
-                ),
-                separation_strength=0.0,
-                gas_texture=morph_gas_struct,
-                periodic_x=wrap_lon_blur_x,
-                blur_fn=_blur_separable_xy,
-                rng=rng_post,
-            )
-            if morph_gas_struct is not None and disk_w is not None:
-                canvas = _reinforce_morph_canvas_texture(
-                    canvas,
-                    morph_gas_struct,
-                    disk_w,
-                    plane_gate=plane_gate,
-                    strength=1.35,
-                )
-            if ext_paint_for_fg is not None and disk_w is not None:
-                canvas = _sculpt_morphology_lane_contrast(
-                    canvas,
-                    ext_paint_for_fg,
-                    disk_w,
-                    plane_gate=plane_gate,
-                    strength=1.02,
-                )
-                canvas = apply_band_luma_separation(
-                    canvas,
-                    ext_paint_for_fg,
-                    disk_w,
-                    dust_absorption=_dust_m,
-                    latent_turb=_turb_m,
-                    morph_gas=morph_gas_struct,
-                    strength=float(cfg.features.galactic_band_separation_strength),
-                    periodic_x=wrap_lon_blur_x,
-                )
-                canvas = apply_band_display_microstructure(
-                    canvas,
-                    ext_paint_for_fg,
-                    disk_w,
-                    dust_absorption=_dust_m,
-                    latent_turb=_turb_m,
-                    morph_gas=morph_gas_struct,
-                    strength=float(cfg.features.galactic_band_micro_display_strength)
-                    * 0.55,
-                    periodic_x=wrap_lon_blur_x,
-                )
-        # #region agent log
-        _dbg_log(
-            "D",
-            "generator.py:pre_save",
-            "final canvas before clip",
-            _dbg_band_stats(canvas, disk_w),
-        )
-        if core_void_mask is not None:
-            _cr = int(canvas.shape[0] // 2)
-            _dbg_log(
-                "C",
-                "generator.py:pre_save",
-                "core_void_mask on center row",
-                {
-                    "void_row_min": float(np.min(core_void_mask[_cr, :])),
-                    "void_row_mean": float(np.mean(core_void_mask[_cr, :])),
-                    "void_row_max": float(np.max(core_void_mask[_cr, :])),
-                },
-            )
-        if galactic is not None and galactic.disk_thickness_modulation is not None:
-            _meso = np.asarray(galactic.disk_thickness_modulation, dtype=np.float64)
-            _cr = int(canvas.shape[0] // 2)
-            _dbg_log(
-                "C",
-                "generator.py:pre_save",
-                "mesoscale thickness on center row",
-                {
-                    "meso_row_min": float(np.min(_meso[_cr, :])),
-                    "meso_row_max": float(np.max(_meso[_cr, :])),
-                    "meso_row_mean": float(np.mean(_meso[_cr, :])),
-                },
-            )
-        # #endregion
         if disk_w is not None:
             _sky_crush = np.clip(1.0 - np.clip(disk_w, 0.0, 1.0) ** 1.12, 0.0, 1.0)
             if _sky_crush.ndim == 1:
                 _sky_crush = _sky_crush[:, None]
+            if cfg.nebula_mode == NebulaMode.galaxy_streak:
+                _dw_c = np.clip(np.asarray(disk_w, dtype=np.float64), 0.0, 1.0)
+                if _dw_c.ndim == 1:
+                    _dw_c = _dw_c[:, None]
+                if _dw_c.shape != _sky_crush.shape:
+                    _dw_c = np.broadcast_to(_dw_c, _sky_crush.shape)
+                # Stronger off-band crush for cinematic blacks (less purple-grey haze).
+                _crush_amt = 0.78 * (1.0 - _dw_c**0.55 * 0.72)
+            else:
+                _crush_amt = 0.92
+            _sky_lu_pre = 0.0
+            if disk_w is not None:
+                _sm = np.clip(disk_w, 0.0, 1.0) < 0.10
+                if bool(np.any(_sm)):
+                    _sky_lu_pre = float(np.mean(rec709_luma(canvas)[_sm]))
+            _crush_mix = np.clip(_sky_crush * _crush_amt, 0.0, 1.0)
+            if _crush_mix.ndim == 1:
+                _crush_mix = _crush_mix[:, None]
             canvas = np.maximum(
                 0.0,
-                canvas * (1.0 - _sky_crush[..., np.newaxis] * 0.92),
+                canvas * (1.0 - _crush_mix[..., np.newaxis]),
             )
-        # #region agent log
-        import os as _os_abl
-
-        if _os_abl.environ.get("STK_ABLATION") and disk_w is not None:
-            _dbg_hist("canvas_pre_save", canvas, disk_w, hypothesis_id="BG")
-        # #endregion
+        if (
+            cfg.nebula_mode == NebulaMode.galaxy_streak
+            and stars_above_nebula
+            and cfg.features.stars
+            and cfg.features.cosmic_star_enabled
+            and float(np.max(stars_cosmic)) > 1e-8
+            and disk_w is not None
+        ):
+            _cs = float(cfg.features.star_display_stretch_gain)
+            if _cs < 1.0:
+                _cs = 10.0
+            cosmic_disp = _hdr_stars_to_display(
+                stars_cosmic,
+                disk_w,
+                stretch_gain=_cs,
+                peak_percentile=cfg.features.star_stretch_peak_percentile,
+                faint_desat=0.0,
+                display_cap=cfg.features.star_display_white_cap,
+                output_gain=1.48,
+            )
+            _dw_c = np.clip(disk_w, 0.0, 1.0)
+            _sky_disk = _dw_c < 0.14
+            _yy_s = np.linspace(-1.0, 1.0, cfg.height, dtype=np.float64)[:, None]
+            _bg = np.exp(-((_yy_s**2) / 0.58)) * _dw_c
+            _fade = np.clip(1.0 - _bg, 0.0, 1.0)[..., np.newaxis]
+            sky_gate = np.where(_sky_disk[:, :, np.newaxis], 1.0, _fade * 0.18)
+            canvas = np.maximum(canvas, np.clip(cosmic_disp * sky_gate, 0.0, 1.0))
+        # Final pass: kill residual HF gold dashes after late composite/grade.
+        if (
+            disk_w is not None
+            and cfg.nebula_mode == NebulaMode.galaxy_streak
+            and getattr(cfg.features, "look_target", None) == LookTarget.cinematic
+        ):
+            canvas = suppress_gold_chroma_islands(
+                canvas,
+                disk_w,
+                strength=1.0,
+                periodic_x=wrap_lon_blur_x,
+                blur_fn=_blur_separable_xy,
+            )
+            # Row-comb worms often read as thin horizontal gold dashes.
+            canvas = attenuate_rgb_row_comb(canvas, disk_w, strength=0.72)
+            canvas = suppress_gold_chroma_islands(
+                canvas,
+                disk_w,
+                strength=0.85,
+                periodic_x=wrap_lon_blur_x,
+                blur_fn=_blur_separable_xy,
+            )
         canvas = ensure_hdr(np.clip(canvas, 0.0, 1.0))
         _notify_stage("grade/color", 1.0)
 
@@ -5037,6 +5425,8 @@ def render_single(
             ext,
             cfg.quality,
             dither_strength=cfg.features.blue_noise_dither_strength,
+            copyright=cfg.image_copyright,
+            license=cfg.image_license,
         )
         saved["equirectangular"] = eq_path
         _notify_stage("save equirectangular", 1.0)
@@ -5053,6 +5443,10 @@ def render_single(
             stars_fg=stars_fg if cfg.features.stars else np.zeros_like(canvas),
             ext_paint=ext_paint_for_fg,
             rng_post=rng_post,
+            neb_puff_mod=debug_neb_puff_mod,
+            morph_gas_struct=morph_gas_struct,
+            band_bleed_env=debug_band_bleed_env,
+            band_plan=band_plan,
         )
 
     if cfg.projection_mode in {ProjectionMode.cubemap, ProjectionMode.both}:
@@ -5066,6 +5460,8 @@ def render_single(
                 ext,
                 cfg.quality,
                 dither_strength=cfg.features.blue_noise_dither_strength,
+                copyright=cfg.image_copyright,
+                license=cfg.image_license,
             )
             _notify_stage(f"save cube {face_name}", 1.0)
         saved["cubemap"] = cfg.output_dir

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "starsky-gen"
 version = "0.1.0"
-description = "Realistic starfield generator for games and skyboxes"
+description = "Cinematic AAA skybox and starfield generator for games"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -19,6 +19,7 @@ dependencies = [
   "typer>=0.12.0",
   "rich>=13.0.0",
   "pydantic>=2.7.0",
+  "PyYAML>=6.0.0",
 ]
 
 [project.optional-dependencies]

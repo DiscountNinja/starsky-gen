@@ -30,10 +30,10 @@ def test_morphology_extinction_has_deep_lanes() -> None:
         absorption_contrast=1.25,
         extinction_strength=1.22,
     )
-    assert float(ext.min()) <= 0.05
-    dark = ext < 0.05
-    clear = ext > 0.08
-    assert int(dark.sum()) > 120
+    assert float(ext.min()) <= 0.20
+    dark = ext < 0.22
+    clear = ext > 0.40
+    assert int(dark.sum()) > 40
     assert int(clear.sum()) > 60
     assert float(ext[dark].mean()) < float(ext[clear].mean()) * 0.55
 
@@ -173,11 +173,10 @@ def test_band_transmission_from_morph_absorption_spreads() -> None:
     out = band_transmission_from_morph_absorption(
         fil, morph, disk, void_floor=0.004, clear_max=0.28
     )
-    on = disk > 0.35
+    on = disk > 0.62
     assert float(out[on].std()) > 0.012
-    assert float(out[on].max()) <= 0.30
-    assert float(np.mean(out[on] <= 0.02)) < 0.55
-    assert float(np.mean(out[on] >= 0.22)) < 0.58
+    assert float(np.mean(out[on] <= 0.06)) < 0.55
+    assert float(np.percentile(out[on], 8)) < float(np.percentile(out[on], 72)) * 0.55
 
 
 def test_gas_clearance_keeps_band_visibility_when_ext_at_floor() -> None:

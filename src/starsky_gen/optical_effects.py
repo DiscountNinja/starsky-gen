@@ -72,6 +72,102 @@ def apply_lens_vignette(
     return np.clip(rgb * gains, 0.0, None)
 
 
+def _add_gaussian_blob(
+    out: np.ndarray,
+    gx: float,
+    gy: float,
+    *,
+    sigma: float,
+    amp: float,
+    tint: np.ndarray,
+    periodic_x: bool,
+) -> None:
+    h, w, _ = out.shape
+    half = int(np.clip(round(sigma * 3.2), 3, 16))
+    yy = np.arange(-half, half + 1, dtype=np.float64)
+    xx = np.arange(-half, half + 1, dtype=np.float64)
+    X, Y = np.meshgrid(xx, yy)
+    stamp = np.exp(-(X * X + Y * Y) / (2.0 * sigma * sigma)) * float(amp)
+    for j, dy in enumerate(yy):
+        yi = int(np.round(gy + dy))
+        if yi < 0 or yi >= h:
+            continue
+        for i, dx in enumerate(xx):
+            xi_f = gx + dx
+            if periodic_x:
+                xi = int(np.mod(np.round(xi_f), w))
+            else:
+                xi = int(np.round(xi_f))
+                if xi < 0 or xi >= w:
+                    continue
+            out[yi, xi, :] = np.maximum(0.0, out[yi, xi, :] + stamp[j, i] * tint)
+
+
+def paint_hero_lens_ghosts(
+    rgb: np.ndarray,
+    heroes: list | tuple,
+    rng: np.random.Generator,
+    *,
+    strength: float = 0.055,
+    periodic_x: bool = True,
+) -> np.ndarray:
+    """1–2 soft offset ghost blobs + short spike accent per hero star."""
+    s = float(np.clip(strength, 0.0, 0.35))
+    if s < 1e-6 or not heroes:
+        return rgb
+    out = np.maximum(np.asarray(rgb, dtype=np.float64), 0.0)
+    h, w, _ = out.shape
+    cx, cy = (w - 1) * 0.5, (h - 1) * 0.5
+    for hero in heroes:
+        x = float(getattr(hero, "x", 0.0))
+        y = float(getattr(hero, "y", 0.0))
+        flux = float(getattr(hero, "flux", 1.0))
+        rgb_t = getattr(hero, "rgb", (1.0, 0.95, 0.9))
+        tint = np.clip(np.asarray(rgb_t, dtype=np.float64).reshape(-1)[:3], 0.0, 1.5)
+        if tint.shape[0] < 3:
+            tint = np.array([1.0, 0.95, 0.9], dtype=np.float64)
+        amp = s * float(np.clip(0.55 + 0.12 * np.log10(max(flux, 1.0)), 0.35, 1.35))
+        vx, vy = cx - x, cy - y
+        vn = float(np.hypot(vx, vy)) + 1e-6
+        g1x = (x + vx * float(rng.uniform(0.18, 0.34))) % float(w) if periodic_x else float(
+            np.clip(x + vx * float(rng.uniform(0.18, 0.34)), 0.0, w - 1)
+        )
+        g1y = float(np.clip(y + vy * float(rng.uniform(0.18, 0.34)), 0.0, h - 1))
+        g2x = x - (vx / vn) * float(rng.uniform(12.0, 36.0))
+        g2y = y - (vy / vn) * float(rng.uniform(8.0, 28.0))
+        if periodic_x:
+            g2x = g2x % float(w)
+        else:
+            g2x = float(np.clip(g2x, 0.0, w - 1))
+        g2y = float(np.clip(g2y, 0.0, h - 1))
+        _add_gaussian_blob(
+            out, g1x, g1y, sigma=float(rng.uniform(2.8, 5.5)), amp=amp * 0.55, tint=tint, periodic_x=periodic_x
+        )
+        _add_gaussian_blob(
+            out, g2x, g2y, sigma=float(rng.uniform(1.8, 3.6)), amp=amp * 0.28, tint=tint, periodic_x=periodic_x
+        )
+        ang = float(rng.uniform(0.0, np.pi))
+        length = float(rng.uniform(10.0, 22.0))
+        ts = np.linspace(-length, length, int(length * 2) + 1)
+        for t in ts:
+            fall = float(np.exp(-(abs(t) / max(length, 1e-3)) ** 1.6))
+            for arm_scale, arm_amp in ((1.0, 0.22), (0.55, 0.14)):
+                a = ang if arm_scale >= 0.99 else ang + 0.5 * np.pi
+                px = x + np.cos(a) * t * arm_scale
+                py = y + np.sin(a) * t * arm_scale
+                if periodic_x:
+                    pxi = int(np.mod(np.round(px), w))
+                else:
+                    if px < 0 or px >= w:
+                        continue
+                    pxi = int(np.round(px))
+                if py < 0 or py >= h:
+                    continue
+                pyi = int(np.round(py))
+                out[pyi, pxi, :] = np.maximum(0.0, out[pyi, pxi, :] + fall * amp * arm_amp * tint)
+    return out
+
+
 def apply_thin_film_lens_flare(
     rgb: np.ndarray,
     disk_w: np.ndarray,

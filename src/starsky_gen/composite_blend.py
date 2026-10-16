@@ -36,6 +36,8 @@ def normalize_star_stack_luma_preserve_chroma(
     *,
     percentile: float = 98.5,
     target: float = 0.82,
+    scale_lo: float = 0.55,
+    scale_hi: float = 1.35,
 ) -> np.ndarray:
     """Gentle global luma normalize on the star layer (chroma preserved)."""
     s = np.maximum(stars.astype(np.float64), 0.0)
@@ -45,7 +47,7 @@ def normalize_star_stack_luma_preserve_chroma(
         return s.astype(HDR_DTYPE)
     ref = float(np.percentile(positive, float(np.clip(percentile, 90.0, 99.5))))
     scale = float(target) / max(ref, 1e-8)
-    scale = float(np.clip(scale, 0.55, 1.35))
+    scale = float(np.clip(scale, float(scale_lo), float(scale_hi)))
     return remap_luma_preserving_chroma(s, lu * scale).astype(HDR_DTYPE)
 
 
@@ -224,6 +226,35 @@ def composite_stars_over_display_canvas(
     mb = float(np.clip(max_blend_in_band, 0.0, 1.0))
     peak_w = (1.0 - mb * gate)[..., np.newaxis]
     out = np.maximum(out, base * peak_w + stars_adj * (1.0 - peak_w))
+    return np.clip(out, 0.0, 1.0)
+
+
+def composite_galaxy_stars_preserving_chroma(
+    canvas: np.ndarray,
+    star_disp: np.ndarray,
+    band_gate: np.ndarray,
+    *,
+    screen_strength: float = 0.78,
+    star_peak_weight: float = 0.96,
+) -> np.ndarray:
+    """Screen + peak-pick stars over a bright band without RGB add clipping to white."""
+    base = np.maximum(np.asarray(canvas, dtype=np.float64), 0.0)
+    stars = np.maximum(np.asarray(star_disp, dtype=np.float64), 0.0)
+    gate = np.clip(np.asarray(band_gate, dtype=np.float64), 0.0, 1.0)
+    if gate.ndim == 1:
+        gate = gate[:, None]
+    h, w_img = base.shape[:2]
+    gate = np.broadcast_to(gate, (h, w_img))
+    g3 = gate[..., np.newaxis]
+    s = stars * g3 * float(np.clip(star_peak_weight, 0.5, 1.0))
+    ss = float(np.clip(screen_strength, 0.35, 1.0))
+    screen = 1.0 - (1.0 - base) * (1.0 - s * ss)
+    lu_s = rec709_luma(s)
+    lu_b = rec709_luma(base)
+    peak = (lu_s > np.maximum(lu_b * 0.78, 0.05)) & (gate > 0.06)
+    out = screen
+    if bool(np.any(peak)):
+        out[peak] = np.maximum(s[peak], screen[peak])
     return np.clip(out, 0.0, 1.0)
 
 

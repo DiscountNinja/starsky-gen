@@ -8,9 +8,14 @@ HDR_DTYPE = np.float32
 
 
 def hdr_zeros(shape: tuple[int, ...] | int, *sizes: int) -> np.ndarray:
-    if sizes:
-        shape = (shape, *sizes)  # type: ignore[assignment]
-    return np.zeros(shape, dtype=HDR_DTYPE)
+    full: tuple[int, ...]
+    if isinstance(shape, int):
+        full = (shape, *sizes)
+    elif sizes:
+        full = (*shape, *sizes)
+    else:
+        full = shape
+    return np.zeros(full, dtype=HDR_DTYPE)
 
 
 def as_hdr(arr: np.ndarray) -> np.ndarray:

@@ -431,10 +431,10 @@ def generate_nebula(
                 neb_dbg = np.stack([r, g, np.zeros_like(r)], axis=2)
                 plane = np.clip(0.5 * (r + g), 0.0, 1.0)
             elif dp_dbg == "layer_carve":
-                plane = np.clip(pack_dbg["carve"], 0.0, 1.0)  # type: ignore[union-attr]
+                plane = np.clip(pack_dbg["carve"], 0.0, 1.0)  # type: ignore[index]
                 neb_dbg = np.stack([plane, plane, plane], axis=2)
             elif dp_dbg == "layer_dust_alpha":
-                plane = np.clip(pack_dbg["dust_alpha"], 0.0, 1.0)  # type: ignore[union-attr]
+                plane = np.clip(pack_dbg["dust_alpha"], 0.0, 1.0)  # type: ignore[index]
                 neb_dbg = np.stack([plane, plane, plane], axis=2)
             else:
                 key = {"layer_base": "base", "layer_filaments": "ridged", "layer_fine": "fine"}[dp_dbg]

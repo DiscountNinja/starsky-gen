@@ -17,6 +17,7 @@ from starsky_gen.procedural_noise import (
 )
 
 
+
 def _blur_y_only_field(field: np.ndarray, sigma: float) -> np.ndarray:
     """Elongate filaments along galactic latitude (vertical in equirect)."""
     sig = max(float(sigma), 0.15)
@@ -114,6 +115,49 @@ def compress_absorption_opacity(
     return np.clip(a * (1.0 - mix_f) + compressed * mix_f, 0.0, 1.0).astype(np.float64)
 
 
+def apply_cloudy_transmission_breakup(
+    transmission: np.ndarray,
+    puff_field: np.ndarray,
+    band_weight: np.ndarray | None,
+    *,
+    strength: float = 0.78,
+    void_floor: float = 0.06,
+    periodic_x: bool = True,
+    drive_weight: np.ndarray | None = None,
+) -> np.ndarray:
+    """Soft cloudy T variation from smoothed puff density (no ridged cell reinjection)."""
+    from starsky_gen.procedural_noise import gaussian_blur_pil
+
+    s = float(np.clip(strength, 0.0, 1.2))
+    if s < 1e-6:
+        return np.clip(transmission, void_floor, 1.0).astype(np.float64)
+    vf = float(np.clip(void_floor, 0.01, 0.2))
+    t = np.clip(np.asarray(transmission, dtype=np.float64), vf, 1.0)
+    puff = np.clip(np.asarray(puff_field, dtype=np.float64), 0.0, 1.0)
+    h, w = t.shape
+    if puff.shape != (h, w):
+        puff = np.broadcast_to(puff, (h, w))
+    gate = _band_host_gate(band_weight, (h, w))
+    scale = float(max(h, w))
+    sig = float(np.clip(scale * 0.012, 1.2, 9.5))
+    puff_s = gaussian_blur_pil(puff, sig, periodic_x=periodic_x)
+    puff_s = gaussian_blur_pil(puff_s, sig * 0.65, periodic_x=periodic_x)
+    puff_s = np.clip(puff_s**0.90, 0.0, 1.0)
+    clear = vf + (1.0 - vf) * np.clip(0.52 + 0.38 * puff_s, 0.0, 1.0)
+    dusty = vf + (1.0 - vf) * np.clip(0.08 + 0.20 * (1.0 - puff_s) ** 1.02, 0.0, 0.44)
+    mix = gate * s * 0.40
+    if drive_weight is not None:
+        dw = np.clip(np.asarray(drive_weight, dtype=np.float64), 0.0, 1.0)
+        if dw.shape != (h, w):
+            from starsky_gen.procedural_noise import _resize_bilinear
+
+            dw = _resize_bilinear(dw, h, w, periodic_x=periodic_x)
+        mix = mix * (0.35 + 0.65 * dw)
+    cloud = clear * puff_s + dusty * (1.0 - puff_s)
+    out = t * (1.0 - mix) + cloud * mix
+    return np.clip(out, vf, 1.0).astype(np.float64)
+
+
 def transmission_from_absorption_map(
     absorption: np.ndarray,
     *,
@@ -123,9 +167,30 @@ def transmission_from_absorption_map(
 ) -> np.ndarray:
     """Map erosion absorption [0,1] → transmission with sharp fractured falloff."""
     a = compress_absorption_opacity(absorption, gamma=opacity_gamma)
-    vf = float(np.clip(void_floor, 0.01, 0.2))
-    sh = float(np.clip(sharpness, 1.2, 5.8))
+    vf = float(np.clip(void_floor, 0.01, 0.22))
+    sh = float(np.clip(sharpness, 1.0, 4.2))
     return np.clip(vf + (1.0 - vf) * (1.0 - a**sh), vf, 1.0).astype(np.float64)
+
+
+def lift_extinction_transmission_shadows(
+    transmission: np.ndarray,
+    void_floor: float,
+    *,
+    lift_gamma: float = 0.62,
+    band_weight: np.ndarray | None = None,
+    periodic_x: bool = True,
+) -> np.ndarray:
+    """Lift pinned lane transmission off void_floor while keeping relative filament contrast."""
+    vf = float(np.clip(void_floor, 0.01, 0.22))
+    g = float(np.clip(lift_gamma, 0.45, 0.92))
+    t = np.clip(np.asarray(transmission, dtype=np.float64), vf, 1.0)
+    norm = (t - vf) / (1.0 - vf + 1e-8)
+    lifted = vf + np.clip(norm, 0.0, 1.0) ** g * (1.0 - vf)
+    if band_weight is None:
+        return lifted.astype(np.float64)
+    gate = _extinction_coupling_gate(band_weight, t.shape, None, periodic_x=periodic_x)
+    w = np.clip(gate**0.9, 0.0, 1.0)
+    return (t * (1.0 - w) + lifted * w).astype(np.float64)
 
 
 def reinforce_absorption_edges(
@@ -134,9 +199,14 @@ def reinforce_absorption_edges(
     *,
     edge_gain: float = 0.42,
     periodic_x: bool = True,
+    void_floor: float = 0.06,
 ) -> np.ndarray:
     """Sharpen lane rims: fractured absorption, not smoky gradients."""
-    t = np.clip(np.asarray(transmission, dtype=np.float64), 0.0, 1.0)
+    eg = float(np.clip(edge_gain, 0.0, 0.55))
+    if eg < 0.08:
+        return np.clip(np.asarray(transmission, dtype=np.float64), void_floor, 1.0).astype(np.float64)
+    vf = float(np.clip(void_floor, 0.01, 0.22))
+    t = np.clip(np.asarray(transmission, dtype=np.float64), vf, 1.0)
     a = np.clip(np.asarray(absorption, dtype=np.float64), 0.0, 1.0)
     if periodic_x:
         gx = 0.5 * (np.roll(a, -1, axis=1) - np.roll(a, 1, axis=1))
@@ -146,8 +216,8 @@ def reinforce_absorption_edges(
     grad = np.sqrt(gx**2 + gy**2 + 1e-12)
     g93 = float(np.percentile(grad, 93.0))
     edge = np.clip(grad / (g93 + 1e-6), 0.0, 1.0) ** 1.38
-    carve = edge * float(np.clip(edge_gain, 0.0, 1.2)) * (a**1.12)
-    return np.clip(t * (1.0 - carve), 0.01, 1.0).astype(np.float64)
+    carve = np.clip(edge * eg * (a**1.08), 0.0, 0.26)
+    return np.clip(t * (1.0 - carve), vf, 1.0).astype(np.float64)
 
 
 def build_fractal_extinction_field(
@@ -316,6 +386,48 @@ def attenuate_column_comb(
     out = a.copy()
     out[gate] = np.clip(a[gate] - comb[gate], 0.0, 1.0)
     return out.astype(np.float64)
+
+
+def attenuate_row_comb(
+    field: np.ndarray,
+    band_weight: np.ndarray | None,
+    *,
+    strength: float = 0.48,
+) -> np.ndarray:
+    """Remove latitude-row comb from coarse-grid upscales (horizontal worms in equirect)."""
+    s = float(np.clip(strength, 0.0, 1.0))
+    if s < 1e-6:
+        return np.clip(field, 0.0, 1.0).astype(np.float64)
+    a = np.clip(np.asarray(field, dtype=np.float64), 0.0, 1.0)
+    h, w = a.shape
+    if band_weight is None:
+        gate = np.ones((h, w), dtype=bool)
+    else:
+        gate = _band_host_gate(band_weight, (h, w)) > 0.20
+        if not bool(np.any(gate)):
+            return a
+    row = np.mean(a, axis=1, keepdims=True)
+    row_2d = np.broadcast_to(row, (h, w)).copy()
+    row_blur = _blur_y_only_field(row_2d, float(np.clip(h * 0.014, 2.5, 12.0)))
+    comb = (row_2d - row_blur) * s
+    out = a.copy()
+    out[gate] = np.clip(a[gate] - comb[gate], 0.0, 1.0)
+    return out.astype(np.float64)
+
+
+def attenuate_rgb_row_comb(
+    rgb: np.ndarray,
+    band_weight: np.ndarray | None,
+    *,
+    strength: float = 0.58,
+) -> np.ndarray:
+    """Row-comb cleanup on diffuse RGB (luma-preserving)."""
+    from starsky_gen.color_science import rec709_luma, remap_luma_preserving_chroma
+
+    lin = np.maximum(np.asarray(rgb, dtype=np.float64), 0.0)
+    lu = rec709_luma(lin)
+    lu_fix = attenuate_row_comb(lu, band_weight, strength=strength)
+    return np.maximum(0.0, remap_luma_preserving_chroma(lin, lu_fix)).astype(np.float64)
 
 
 def deepen_center_band_transmission(
@@ -516,8 +628,8 @@ def fragment_lane_absorption(
     d = np.clip(np.asarray(disruption, dtype=np.float64), 0.0, 1.0)
     t = np.clip(np.asarray(latent_turb, dtype=np.float64), 0.0, 1.0)
     filament = np.maximum(d * (0.48 + 0.52 * t), lane_hi * 0.42)
-    filament = _blur_y_only_field(filament, 1.05)
-    filament = _blur_x_only_field(filament, 0.72, periodic_x=periodic_x)
+    filament = _blur_x_only_field(filament, 1.25, periodic_x=periodic_x)
+    filament = _blur_y_only_field(filament, 0.32)
     ch, cw = max(6, h // 32), max(8, w // 20)
     edge_n = fbm2d(
         np.random.default_rng(int(h * 31 + w * 17) & 0xFFFFFFFF),
@@ -569,8 +681,8 @@ def apply_turbulent_cloud_breakup(
     raw = np.clip(ridged * 0.52 + turb * 0.38 + ridge_fil * 0.28 + dust * 0.22, 0.0, 1.0)
     med_sig = float(np.clip(scale * 0.012, 1.0, 12.0))
     raw_hp = np.clip(raw - gaussian_blur_pil(raw, med_sig, periodic_x=periodic_x) * 0.78, 0.0, 1.0)
-    raw_hp = _blur_x_only_field(raw_hp, 0.55, periodic_x=periodic_x)
-    raw_hp = _blur_y_only_field(raw_hp, 0.85)
+    raw_hp = _blur_x_only_field(raw_hp, 0.92, periodic_x=periodic_x)
+    raw_hp = _blur_y_only_field(raw_hp, 0.38)
     lo = float(np.percentile(raw_hp, 62.0))
     hi = float(np.percentile(raw_hp, 96.5))
     if hi > lo + 1e-8:
@@ -831,15 +943,14 @@ def carve_dust_transmission_microstructure(
     lo = float(np.percentile(detail, 56.0))
     hi = float(np.percentile(detail, 97.0))
     if hi > lo + 1e-8:
-        detail = np.clip((detail - lo) / (hi - lo), 0.0, 1.0) ** 1.18
+        detail = np.clip((detail - lo) / (hi - lo), 0.0, 1.0) ** 0.82
     detail = np.clip(detail * (0.12 + 0.88 * band_gate), 0.0, 1.0)
-    t_soft = gaussian_blur_pil(t, fine_sig * 1.4, periodic_x=periodic_x)
-    t_hp = np.clip(t_soft - t, 0.0, 1.0)
-    lane_w = np.clip((1.0 - t) ** 0.45, 0.06, 1.0) * band_gate
-    carve = detail * s_eff * 0.72 * lane_w
-    out = np.clip(t * (1.0 - carve) + t_hp * s_eff * 0.14 * lane_w, vf, 1.0)
+    t_soft = gaussian_blur_pil(t, fine_sig * 1.8, periodic_x=periodic_x)
+    lane_w = np.clip((1.0 - t_soft) ** 0.42, 0.06, 1.0) * band_gate
+    carve = detail * s_eff * 0.42 * lane_w
+    out = np.clip(t * (1.0 - carve) + t_soft * carve * 0.22, vf, 1.0)
     t_fine = transmission_from_absorption_map(
-        np.clip(dust**1.04, 0.0, 1.0), void_floor=vf, sharpness=4.35
+        np.clip(dust**1.04, 0.0, 1.0), void_floor=vf, sharpness=2.35
     )
     thr = float(np.percentile(detail[band_mask], 68.0)) if bool(np.any(band_mask)) else float(
         np.percentile(detail, 72.0)
@@ -904,9 +1015,11 @@ def compose_constructive_extinction_transmission(
     lane_w = np.clip((1.0 - t) ** 0.50, 0.05, 1.0) * band_gate
     detail = np.clip(d_small * (1.0 + 0.42 * d_med) + d_fine * (1.0 + 0.38 * d_small), 0.0, 1.0)
     band_boost = 1.0 + 0.22 * band_gate
-    s_eff = float(np.clip(0.88 + 0.12 * s, 0.88, 1.5))
-    out = np.clip(t * (1.0 - detail * s_eff * 0.58 * lane_w * band_boost), vf, 1.0)
-    out = np.clip(out + d_fine * s_eff * 0.12 * lane_w, vf, 1.0)
+    t_in = t.copy()
+    s_eff = float(np.clip(0.32 + 0.06 * s, 0.28, 0.48))
+    carve_amt = np.clip(detail * s_eff * 0.20 * lane_w * band_boost, 0.0, 0.32)
+    out = np.clip(t_in * (1.0 - carve_amt), vf, 1.0)
+    out = np.clip(out + d_fine * s_eff * 0.06 * lane_w, vf, 1.0)
     if periodic_x:
         gx = 0.5 * (np.roll(d_mega, -1, axis=1) - np.roll(d_mega, 1, axis=1))
     else:
@@ -915,10 +1028,11 @@ def compose_constructive_extinction_transmission(
     grad = np.sqrt(gx**2 + gy**2 + 1e-12)
     g93 = float(np.quantile(grad, 0.93))
     gn = np.clip(grad / (g93 + 1e-6), 0.0, 1.0)
-    out = np.clip(out * (1.0 - 0.12 * gn * s * lane_w), vf, 1.0)
-    frag = np.clip((d_small - d_med) * s * 0.16, -0.18, 0.18)
-    out = np.clip(out * (1.0 - frag * lane_w), vf, 1.0)
-    return np.minimum(out, t).astype(np.float64)
+    out = np.clip(out * (1.0 - 0.06 * gn * s * lane_w), vf, 1.0)
+    frag = np.clip((d_small - d_med) * s * 0.08, -0.12, 0.12)
+    out = np.clip(out * (1.0 - frag * lane_w * 0.65), vf, 1.0)
+    preserve = float(np.clip(0.58 + 0.22 * (1.0 - s), 0.52, 0.78))
+    return np.clip(preserve * t_in + (1.0 - preserve) * out, vf, 1.0).astype(np.float64)
 
 
 def build_morphology_extinction_transmission(
@@ -949,19 +1063,19 @@ def build_morphology_extinction_transmission(
     absorption = np.zeros((h, w), dtype=np.float64)
     if galactic.extinction_maps is not None:
         em = galactic.extinction_maps
-        absorption = np.maximum(absorption, em.erosion * (1.18 * fil_s))
+        absorption = np.maximum(absorption, em.erosion * (0.92 * fil_s))
         fract = np.clip(em.fractal_dark, 0.0, 1.0)
         fract_soft = gaussian_blur_pil(
             fract, float(np.clip(scale * 0.04, 5.0, 48.0)), periodic_x=periodic_x
         )
         fract_lane = np.clip(fract - fract_soft * 0.78, 0.0, 1.0) ** 1.18
-        absorption = np.maximum(absorption, fract_lane * (1.02 * fil_s))
+        absorption = np.maximum(absorption, fract_lane * (0.82 * fil_s))
         disc = np.clip(em.disruption, 0.0, 1.0)
         disc_soft = gaussian_blur_pil(
             disc, float(np.clip(scale * 0.04, 5.0, 48.0)), periodic_x=periodic_x
         )
         disc_lane = np.clip(disc - disc_soft * 0.78, 0.0, 1.0) ** 1.22
-        absorption = np.maximum(absorption, disc_lane * (1.12 * min(disc_s, 1.85)))
+        absorption = np.maximum(absorption, disc_lane * (0.88 * min(disc_s, 1.45)))
     dust_src = np.clip(
         np.asarray(
             getattr(galactic, "dust_absorption_morph", galactic.dust_absorption),
@@ -974,23 +1088,23 @@ def build_morphology_extinction_transmission(
         dust_src, contrast=absorption_contrast * 0.88, p_lo=5.0, p_hi=92.0
     )
     absorption = np.clip(
-        absorption * (0.58 + 0.42 * dust_a * ext_k) + dust_a * (0.20 * ext_k),
+        absorption * (0.78 + 0.22 * dust_a * ext_k) + dust_a * (0.10 * ext_k),
         0.0,
         1.0,
     )
     ridge_dark = np.clip(
         1.0 - np.abs(galactic.latent_ridge * 2.0 - 1.0), 0.0, 1.0
     ) ** 1.38
-    absorption = np.maximum(absorption, ridge_dark * 0.32)
+    absorption = np.maximum(absorption, ridge_dark * 0.16)
     void_w = np.clip(galactic.void_mask, 0.0, 1.0)
     v_soft = gaussian_blur_pil(void_w, float(np.clip(scale * 0.05, 6.0, 56.0)), periodic_x=periodic_x)
     void_lane = np.clip(void_w - v_soft * 0.78, 0.0, 1.0) ** 1.22
-    absorption = np.maximum(absorption, void_lane * 0.10)
+    absorption = np.maximum(absorption, void_lane * 0.05)
     soft_a = gaussian_blur_pil(absorption, float(np.clip(scale * 0.036, 6.0, 44.0)), periodic_x=periodic_x)
     lane_a = np.clip(absorption - soft_a * 0.74, 0.0, 1.0) ** 1.22
     absorption = np.clip(lane_a * 0.62 + absorption * 0.38, 0.0, 1.0)
-    absorption = _blur_x_only_field(absorption, 1.15, periodic_x=periodic_x)
-    absorption = _blur_y_only_field(absorption, 0.35)
+    absorption = _blur_x_only_field(absorption, 1.55, periodic_x=periodic_x)
+    absorption = _blur_y_only_field(absorption, 0.18)
     if galactic.extinction_maps is not None:
         absorption = fragment_lane_absorption(
             absorption,
@@ -1003,30 +1117,17 @@ def build_morphology_extinction_transmission(
         mc = np.clip(np.asarray(morph_coupling, dtype=np.float64), 0.0, 1.35)
         if mc.shape != (h, w):
             mc = _resize_bilinear(mc, h, w, periodic_x=periodic_x)
-        absorption = absorption * (0.74 + 0.26 * np.clip(mc**0.58, 0.38, 1.0))
+        absorption = absorption * (0.86 + 0.14 * np.clip(mc**0.58, 0.55, 1.0))
     elif disk_weight is not None:
         dw_soft = _feathered_band_host_gate(disk_weight, (h, w), periodic_x=periodic_x)
         absorption = absorption * (0.82 + 0.18 * dw_soft**0.55)
     absorption = stretch_absorption_contrast(
-        absorption, contrast=absorption_contrast * 1.14, p_lo=2.0, p_hi=88.0
+        absorption, contrast=absorption_contrast * 0.98, p_lo=4.0, p_hi=90.0
     )
-    vf = float(np.clip(void_floor, 0.004, 0.10))
-    og = float(np.clip(opacity_gamma, 1.0, 2.6))
+    vf = float(np.clip(void_floor, 0.008, 0.18))
+    og = float(np.clip(opacity_gamma, 1.0, 2.2))
     trans = transmission_from_absorption_map(
-        absorption, void_floor=vf, sharpness=4.25, opacity_gamma=og
-    )
-    if galactic.extinction_maps is not None and float(discontinuity_strength) > 1e-6:
-        trans = carve_extinction_discontinuities(
-            trans,
-            galactic.extinction_maps.disruption,
-            strength=float(discontinuity_strength) * 1.12,
-            void_floor=vf,
-        )
-    trans = reinforce_absorption_edges(
-        trans,
-        absorption,
-        edge_gain=0.88 * fil_s,
-        periodic_x=periodic_x,
+        absorption, void_floor=vf, sharpness=2.05, opacity_gamma=og
     )
     trans = finalize_morphology_extinction_transmission(
         trans,
@@ -1037,27 +1138,30 @@ def build_morphology_extinction_transmission(
         morph_coupling=morph_coupling,
     )
     dw_host = disk_weight if disk_weight is not None else galactic.disk_weight
+    morph_primary = galactic.extinction_maps is not None
+    ft_scale = 0.20 if morph_primary else 1.0
     trans = apply_fine_extinction_texture(
         trans,
         dust_src,
         galactic.latent_turb,
         void_floor=vf,
         periodic_x=periodic_x,
-        strength=fine_texture_strength,
+        strength=float(fine_texture_strength) * ft_scale,
         band_weight=dw_host,
         coupling_weight=morph_coupling,
     )
-    trans = apply_turbulent_cloud_breakup(
-        trans,
-        dust_src,
-        galactic.latent_turb,
-        galactic.latent_ridge,
-        void_floor=vf,
-        periodic_x=periodic_x,
-        strength=float(fine_texture_strength) * 0.92,
-        band_weight=dw_host,
-        coupling_weight=morph_coupling,
-    )
+    if not morph_primary:
+        trans = apply_turbulent_cloud_breakup(
+            trans,
+            dust_src,
+            galactic.latent_turb,
+            galactic.latent_ridge,
+            void_floor=vf,
+            periodic_x=periodic_x,
+            strength=float(fine_texture_strength) * 0.48,
+            band_weight=dw_host,
+            coupling_weight=morph_coupling,
+        )
     if brutal_mask is not None:
         from starsky_gen.structure_envelope import apply_brutal_erasure_transmission
 
@@ -1067,7 +1171,7 @@ def build_morphology_extinction_transmission(
             survival_floor=float(brutal_survival_floor),
             periodic_x=periodic_x,
         )
-    detail_s = float(np.clip(0.62 + fine_texture_strength * 0.62, 0.0, 1.0))
+    detail_s = float(np.clip(0.38 + fine_texture_strength * 0.38, 0.0, 0.72))
     dust_t_src = np.clip(
         np.asarray(
             getattr(galactic, "dust_transmission_morph", galactic.dust_transmission),
@@ -1076,22 +1180,16 @@ def build_morphology_extinction_transmission(
         vf,
         1.0,
     )
-    trans = compose_constructive_extinction_transmission(
-        trans,
-        dust_t_src,
-        void_floor=vf,
-        detail_strength=detail_s,
-        periodic_x=periodic_x,
-        disk_weight=disk_weight if disk_weight is not None else galactic.disk_weight,
-        coupling_weight=morph_coupling,
-    )
+    # compose_constructive was pinning ~73% of band pixels to void_floor (log C); morph
+    # detail is applied in band_transmission_from_morph_absorption instead.
+    _ = dust_t_src, detail_s
     dw_host = disk_weight if disk_weight is not None else galactic.disk_weight
     trans = band_transmission_from_morph_absorption(
         trans,
         dust_src,
         dw_host,
         void_floor=vf,
-        clear_max=0.22,
+        clear_max=0.44,
         periodic_x=periodic_x,
         filament_detail=0.34,
         puff_punch_mask=puff_punch_mask,
@@ -1102,14 +1200,14 @@ def build_morphology_extinction_transmission(
         trans,
         dw_host,
         void_floor=vf,
-        strength=0.22,
+        strength=0.04,
         periodic_x=periodic_x,
     )
     trans = carve_dust_transmission_microstructure(
         trans,
         dust_src,
         periodic_x=periodic_x,
-        strength=float(np.clip(0.72 + fine_texture_strength * 0.55, 0.0, 1.35)),
+        strength=float(np.clip(0.28 + fine_texture_strength * 0.22, 0.0, 0.55)),
         void_floor=vf,
         band_weight=dw_host,
         coupling_weight=morph_coupling,
@@ -1122,6 +1220,12 @@ def build_morphology_extinction_transmission(
             dw = dw[:, None]
         if dw.shape != trans.shape:
             dw = np.broadcast_to(dw, trans.shape)
+        trans = attenuate_column_comb(
+            trans, dw, strength=0.05, periodic_x=periodic_x
+        )
+        trans = lift_extinction_transmission_shadows(
+            trans, vf, lift_gamma=0.52, band_weight=dw, periodic_x=periodic_x
+        )
         sky = np.clip(1.0 - apply_disk_weight_pole_falloff(dw, h, sigma=0.34, power=1.18), 0.0, 1.0)
         trans = np.clip(trans * (1.0 - sky) + sky * 0.998, vf, 1.0)
     return trans
@@ -1194,7 +1298,8 @@ def finalize_morphology_extinction_transmission(
         dw_soft = _feathered_band_host_gate(disk_weight, dark.shape, periodic_x=periodic_x)
         lane = lane * (0.52 + 0.48 * dw_soft**0.65)
     boost = float(np.clip(lane_carve_boost, 0.0, 0.98))
-    return np.clip(out * (1.0 - lane * boost * 0.72), vf, 1.0).astype(np.float64)
+    carve_k = float(np.clip(boost * 0.20, 0.0, 0.22))
+    return np.clip(out * (1.0 - lane * carve_k), vf, 1.0).astype(np.float64)
 
 
 def apply_missing_region_extinction(
