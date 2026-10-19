@@ -1468,7 +1468,10 @@ class FeatureConfig(BaseModel):
     )
     debug_export_layers: bool = Field(
         False,
-        description="Write morphology/star/extinction layer PNGs alongside main output.",
+        description=(
+            "Write debug layer PNGs alongside main output "
+            "(MW morphology and/or cloud structure/emission/dust, extinction, resolved stars)."
+        ),
     )
     debug_grayscale_morphology: bool = Field(
         False,
@@ -1552,6 +1555,24 @@ class FeatureConfig(BaseModel):
     bulge_desat: float = Field(0.35, ge=0.0, le=1.0)
     midplane_unsharp_amp: float = Field(0.09, ge=0.0, le=0.35)
     nebula_color_strength: float = Field(1.0, ge=0.3, le=2.0)
+    nebula_interact_density: float = Field(
+        0.55,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Nebula Interactive Layer density gate: higher = mix only in brighter emission. "
+            "Scene finalize sets nebula≈0.45, normal MW≈0.65."
+        ),
+    )
+    nebula_interact_strength: float = Field(
+        0.18,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Nebula Interactive Layer strength: how far star glow/halo chroma leans toward "
+            "local emission (cores stay spectral). Scene finalize sets nebula≈0.35, normal≈0.12."
+        ),
+    )
     dust_opacity: float = Field(1.0, ge=0.3, le=2.0, description="Scale dust lane carve strength.")
     catalog_mode: Literal["off", "positions", "stats_seed", "luminance_overlay"] = Field(
         "off",
@@ -1614,6 +1635,13 @@ class NebulaTuningConfig(BaseModel):
         ge=0.4,
         le=2.5,
         description="Scale localized H II red/magenta cloud patches along the band.",
+    )
+    hero_color: str = Field(
+        "magenta",
+        description=(
+            "Hero nebula tint for --mode nebula: classic-red|red, gold-core|gold, "
+            "cool-blue|blue, magenta-accent|magenta, neutral; or #RRGGBB / R,G,B."
+        ),
     )
     debug_pass: NebulaDebugPass = Field(
         "normal",
@@ -1797,7 +1825,16 @@ def apply_scene_mode_preset(cfg: RenderConfig) -> RenderConfig:
     user-set ``background_star_density_scale`` (including 0) are not overwritten.
     """
     if cfg.scene_mode != SceneMode.nebula:
-        return cfg
+        # Normal MW: Interactive Layer on but quieter (skybox-safe midplane).
+        f = cfg.features
+        upd: dict[str, object] = {}
+        if abs(float(f.nebula_interact_density) - 0.55) < 1e-6:
+            upd["nebula_interact_density"] = 0.65
+        if abs(float(f.nebula_interact_strength) - 0.18) < 1e-6:
+            upd["nebula_interact_strength"] = 0.12
+        if not upd:
+            return cfg
+        return cfg.model_copy(update={"features": f.model_copy(update=upd)})
     f = cfg.features
     # Default look/cinematic floor for density; skip boost when user dialed below it
     # (including 0) or when background stars are off.
@@ -1850,6 +1887,11 @@ def apply_scene_mode_preset(cfg: RenderConfig) -> RenderConfig:
                 "unresolved_gas_occlusion": min(f.unresolved_gas_occlusion, 0.28),
             }
         )
+    # Epic nebula vista: stronger Interactive Layer (glow × emission).
+    if abs(float(f.nebula_interact_density) - 0.55) < 1e-6:
+        update["nebula_interact_density"] = 0.45
+    if abs(float(f.nebula_interact_strength) - 0.18) < 1e-6:
+        update["nebula_interact_strength"] = 0.35
     if f.stars or f.hero_star_enabled:
         if look_le:
             # Keep sharp-core / no-spoke recipe from look preset.

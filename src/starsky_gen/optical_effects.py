@@ -163,7 +163,7 @@ def paint_hero_lens_ghosts(
                     pxi = int(np.round(px))
                 if py < 0 or py >= h:
                     continue
-                pyi = int(np.round(py))
+                pyi = int(np.clip(np.round(py), 0, h - 1))
                 out[pyi, pxi, :] = np.maximum(0.0, out[pyi, pxi, :] + fall * amp * arm_amp * tint)
     return out
 

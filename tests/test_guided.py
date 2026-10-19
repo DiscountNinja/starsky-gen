@@ -36,10 +36,10 @@ def test_should_run_guided_from_argv() -> None:
     assert should_run_guided(["generate"]) is True
     assert should_run_guided(["--width", "4096"]) is False
     assert should_run_guided(["generate", "--seed", "1"]) is False
-    assert should_run_guided(["--no-guided"]) is False
     assert should_run_guided(["--guided"]) is True
     assert should_run_guided(["--guided", "--width", "4096"]) is True
-    assert should_run_guided(["--width", "4096", "--no-guided"]) is False
+    # Any other flag skips guided (including legacy --no-guided if still passed as unknown argv).
+    assert should_run_guided(["--seed", "42"]) is False
 
 
 def test_prompt_str_enter_keeps_default(monkeypatch: pytest.MonkeyPatch, console: Console) -> None:
@@ -68,7 +68,7 @@ def test_parse_int_and_float_ranges() -> None:
 
 def test_format_equivalent_command_omits_defaults() -> None:
     values = dict(STOCK_DEFAULTS)
-    assert format_equivalent_command(values) == "starsky-gen generate"
+    assert format_equivalent_command(values) == "starsky-gen"
 
     values["width"] = 4096
     values["height"] = 2048
@@ -77,7 +77,8 @@ def test_format_equivalent_command_omits_defaults() -> None:
     values["seed"] = 77
     values["look_target"] = LookTarget.documentary
     cmd = format_equivalent_command(values)
-    assert cmd.startswith("starsky-gen generate")
+    assert cmd.startswith("starsky-gen")
+    assert " generate" not in cmd
     assert "--width 4096" in cmd
     assert "--height 2048" in cmd
     assert "--cube" in cmd

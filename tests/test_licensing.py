@@ -14,8 +14,11 @@ from starsky_gen.licensing import (
     apply_prompt_result,
     apply_status_choice,
     copyright_metadata_dict,
+    load_cli_defaults,
     load_license,
+    merge_cli_defaults,
     record_generations,
+    save_cli_defaults,
     save_license,
     should_prompt,
 )
@@ -140,20 +143,76 @@ def test_yaml_roundtrip_and_legacy_json(tmp_path: Path) -> None:
         last_prompt_at=0,
         seed=42,
         look_target="cinematic",
+        cli_defaults={"mode": "nebula", "nebula-style": "dramatic"},
     )
     save_license(state, path)
     text = path.read_text(encoding="utf-8")
+    assert "# legal" in text
+    assert "# defaults" in text
     assert "copyright_status: copyrighted" in text
     assert "distribution_rights: All Rights Reserved" in text
     assert "run_count: 3" in text
     assert "seed: 42" in text
     assert "look_target: cinematic" in text
+    assert "mode: nebula" in text
+    assert "nebula-style: dramatic" in text
     loaded = load_license(path)
     assert loaded.copyright_status == "copyrighted"
     assert loaded.copyright_holder == "Studio"
     assert loaded.distribution_rights == "All Rights Reserved"
     assert loaded.seed == 42
     assert loaded.look_target == "cinematic"
+    assert loaded.cli_defaults["mode"] == "nebula"
+    assert loaded.cli_defaults["nebula-style"] == "dramatic"
+
+
+def test_flat_license_migrates_defaults_empty(tmp_path: Path) -> None:
+    path = tmp_path / ".license"
+    path.write_text(
+        "copyright_status: open\ncopyright_year: 2026\nrun_count: 2\nlast_prompt_at: 2\n",
+        encoding="utf-8",
+    )
+    loaded = load_license(path)
+    assert loaded.copyright_status == "open"
+    assert loaded.cli_defaults == {}
+    save_license(loaded, path)
+    text = path.read_text(encoding="utf-8")
+    assert "# defaults" in text
+    assert "defaults:" in text
+    assert load_license(path).cli_defaults == {}
+
+
+def test_merge_and_load_cli_defaults(tmp_path: Path) -> None:
+    path = tmp_path / ".license"
+    state = apply_status_choice(LicenseState(run_count=0), "open")
+    save_license(state, path)
+    updated = save_cli_defaults({"mode": "nebula", "black-background": True}, path=path)
+    assert updated.cli_defaults["mode"] == "nebula"
+    assert updated.cli_defaults["black-background"] is True
+    assert updated.copyright_status == "open"
+    merged = merge_cli_defaults(updated, {"nebula-style": "dramatic", "mode": "normal"})
+    assert merged.cli_defaults["mode"] == "normal"
+    assert merged.cli_defaults["nebula-style"] == "dramatic"
+    assert merged.cli_defaults["black-background"] is True
+    save_license(merged, path)
+    assert load_cli_defaults(path)["nebula-style"] == "dramatic"
+
+
+def test_record_generations_preserves_cli_defaults(tmp_path: Path) -> None:
+    path = tmp_path / ".license"
+    state = LicenseState(
+        copyright_status="open",
+        copyright_year=2026,
+        distribution_rights="open",
+        run_count=1,
+        last_prompt_at=1,
+        cli_defaults={"mode": "nebula"},
+    )
+    save_license(state, path)
+    updated = record_generations(state, 2, path=path, seed=9)
+    assert updated.run_count == 3
+    assert updated.cli_defaults["mode"] == "nebula"
+    assert load_license(path).cli_defaults["mode"] == "nebula"
 
     legacy = tmp_path / "legacy.license"
     legacy.write_text(

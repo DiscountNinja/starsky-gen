@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import typer
@@ -10,6 +10,13 @@ from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
 from starsky_gen.assist import append_jsonl, mutate_render_config, score_image_guardrails
+from starsky_gen.cli_defaults import (
+    apply_saved_defaults,
+    format_defaults_value_markup,
+    project_defaults_for_display,
+    provided_params_from_ctx,
+    updates_from_kwargs,
+)
 from starsky_gen.config import (
     FeatureConfig,
     IsolateLayer,
@@ -31,7 +38,13 @@ from starsky_gen.guided import (
     run_guided_prompts,
     should_run_guided,
 )
-from starsky_gen.licensing import maybe_prompt_before_generate, record_generations
+from starsky_gen.licensing import (
+    license_path,
+    load_cli_defaults,
+    maybe_prompt_before_generate,
+    record_generations,
+    save_cli_defaults,
+)
 
 app = typer.Typer(
     help="Generate cinematic AAA skyboxes and starfields for games.",
@@ -39,6 +52,37 @@ app = typer.Typer(
     no_args_is_help=False,
 )
 console = Console()
+
+
+def _print_show_defaults(*, license_file: Path | None = None) -> None:
+    path = license_path() if license_file is None else Path(license_file)
+    custom = load_cli_defaults(path)
+    console.print(f"[dim]License file:[/dim] {path}")
+    console.print("")
+    console.print("[bold]Custom defaults[/bold] [dim](.license defaults)[/dim]")
+    if not custom:
+        console.print("  (none)")
+    else:
+        for key in sorted(custom):
+            console.print(f"  {key}: {format_defaults_value_markup(custom[key])}")
+    console.print("")
+    console.print("[bold]Project defaults[/bold] [dim](built-in assumptions)[/dim]")
+    project = project_defaults_for_display()
+    for key in sorted(project):
+        console.print(f"  {key}: {format_defaults_value_markup(project[key])}")
+
+
+def _validate_nebula_hero_color(ctx: typer.Context, param: typer.CallbackParam, value: str) -> str:
+    from starsky_gen.cloud_complex import parse_nebula_hero_color
+
+    _ = ctx, param
+    try:
+        parse_nebula_hero_color(value)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    return value
+
+
 
 
 def _feature_config_from_cli(
@@ -61,10 +105,16 @@ def _feature_config_from_cli(
     hero_star_enabled: bool = True,
     background_star_density_scale: float | None = None,
     isolate_layer: IsolateLayer | str = IsolateLayer.none,
+    nebula_interact_density: float | None = None,
+    nebula_interact_strength: float | None = None,
 ) -> FeatureConfig:
     kw: dict = {}
     if background_star_density_scale is not None:
         kw["background_star_density_scale"] = float(background_star_density_scale)
+    if nebula_interact_density is not None:
+        kw["nebula_interact_density"] = float(nebula_interact_density)
+    if nebula_interact_strength is not None:
+        kw["nebula_interact_strength"] = float(nebula_interact_strength)
     iso = isolate_layer
     if not isinstance(iso, IsolateLayer):
         iso = IsolateLayer(str(iso))
@@ -191,6 +241,31 @@ def _default_to_generate(
         max=1.8,
         help="Dust dimming strength [0–1.8]; 0=none.",
     ),
+
+    nebula_hero_color: str = typer.Option(
+        "magenta",
+        "--nebula-hero-color",
+        help=(
+            "Hero nebula tint: classic-red|red, gold-core|gold, cool-blue|blue, "
+            "magenta-accent|magenta, neutral; or hex (FC5656 or #FC5656) / R,G,B. "
+            "In bash prefer FC5656 unquoted, or quote '#FC5656' (# starts a comment)."
+        ),
+        callback=_validate_nebula_hero_color,
+    ),
+    nebula_interact_density: float | None = typer.Option(
+        None,
+        "--nebula-interact-density",
+        min=0.0,
+        max=1.0,
+        help="Interactive layer density gate [0–1]; higher = only bright emission. Scene default if omitted.",
+    ),
+    nebula_interact_strength: float | None = typer.Option(
+        None,
+        "--nebula-interact-strength",
+        min=0.0,
+        max=1.0,
+        help="Interactive layer strength [0–1]: star glow lean toward local emission. Scene default if omitted.",
+    ),
     nebula_debug_pass: Literal["normal", "occluder_only", "continuum_only"] = typer.Option(
         "normal",
         help="Diagnostic: normal nebula, occluder-only dust RGB, or continuum-only field (galaxy_streak only).",
@@ -205,7 +280,7 @@ def _default_to_generate(
         help="Final plate on black: none | background_stars | heroes | nebula_gas.",
     ),
     debug_export_layers: bool = typer.Option(
-        False, "--debug-layers", help="Write morphology/star/extinction layer PNGs."
+        False, "--debug-layers", help="Write debug layer PNGs (MW morphology and/or cloud structure/emission/dust, extinction, resolved stars)."
     ),
     debug_grayscale_morphology: bool = typer.Option(
         False,
@@ -226,20 +301,33 @@ def _default_to_generate(
         max=2.0,
         help="Off-plane/cosmic/halo star density [0–2]; blank=look default (~0.30 cinematic).",
     ),
-    guided: bool = typer.Option(
-        True,
-        "--guided/--no-guided",
+    save_as_default: bool = typer.Option(
+        False,
+        "--default",
         help=(
-            "Interactive prompts when no other flags are passed (default). "
-            "Any CLI flag skips guided and uses args + defaults. "
-            "Force with --guided; disable with --no-guided."
+            "Merge explicitly passed flags into .license defaults and exit "
+            "(does not render)."
+        ),
+    ),
+    show_defaults: bool = typer.Option(
+        False,
+        "--show-defaults",
+        help="Print custom (.license) and project built-in defaults, then exit.",
+    ),
+    guided: bool = typer.Option(
+        False,
+        "--guided",
+        help=(
+            "Force interactive fine-tuning of arguments (even when other flags "
+            "are set). Bare starsky-gen with no flags already enters guided; "
+            "any other flag uses CLI args + defaults."
         ),
     ),
 ) -> None:
-    """Run a default render when no subcommand is provided."""
+    """Run a render when no subcommand is provided (default entrypoint)."""
     if ctx.invoked_subcommand is None:
-        ctx.invoke(
-            generate,
+        _run_generate(
+            ctx,
             width=width,
             height=height,
             output_base_name=output_base_name,
@@ -267,6 +355,9 @@ def _default_to_generate(
             cloud_continuity=cloud_continuity,
             dust_coverage=dust_coverage,
             dust_strength=dust_strength,
+            nebula_hero_color=nebula_hero_color,
+            nebula_interact_density=nebula_interact_density,
+            nebula_interact_strength=nebula_interact_strength,
             nebula_debug_pass=nebula_debug_pass,
             render_profile=render_profile,
             isolate_layer=isolate_layer,
@@ -276,6 +367,8 @@ def _default_to_generate(
             morphology_scar_strength=morphology_scar_strength,
             noheroes=noheroes,
             background_density=background_density,
+            save_as_default=save_as_default,
+            show_defaults=show_defaults,
             guided=guided,
         )
 
@@ -332,8 +425,9 @@ def _render_stage_labels(cfg: RenderConfig) -> list[str]:
     return labels
 
 
-@app.command()
+@app.command(hidden=True)
 def generate(
+    ctx: typer.Context,
     width: int = typer.Option(2048, help="Output width for equirectangular renders."),
     height: int = typer.Option(1024, help="Output height for equirectangular renders."),
     output_base_name: str = typer.Option("starsky", help="Base filename prefix."),
@@ -432,6 +526,31 @@ def generate(
         max=1.8,
         help="Dust dimming strength [0–1.8]; 0=none.",
     ),
+
+    nebula_hero_color: str = typer.Option(
+        "magenta",
+        "--nebula-hero-color",
+        help=(
+            "Hero nebula tint: classic-red|red, gold-core|gold, cool-blue|blue, "
+            "magenta-accent|magenta, neutral; or hex (FC5656 or #FC5656) / R,G,B. "
+            "In bash prefer FC5656 unquoted, or quote '#FC5656' (# starts a comment)."
+        ),
+        callback=_validate_nebula_hero_color,
+    ),
+    nebula_interact_density: float | None = typer.Option(
+        None,
+        "--nebula-interact-density",
+        min=0.0,
+        max=1.0,
+        help="Interactive layer density gate [0–1]; higher = only bright emission. Scene default if omitted.",
+    ),
+    nebula_interact_strength: float | None = typer.Option(
+        None,
+        "--nebula-interact-strength",
+        min=0.0,
+        max=1.0,
+        help="Interactive layer strength [0–1]: star glow lean toward local emission. Scene default if omitted.",
+    ),
     nebula_debug_pass: Literal["normal", "occluder_only", "continuum_only"] = typer.Option(
         "normal",
         help="Diagnostic: normal nebula, occluder-only dust RGB, or continuum-only field (galaxy_streak only).",
@@ -446,7 +565,7 @@ def generate(
         help="Final plate on black: none | background_stars | heroes | nebula_gas.",
     ),
     debug_export_layers: bool = typer.Option(
-        False, "--debug-layers", help="Write morphology/star/extinction layer PNGs."
+        False, "--debug-layers", help="Write debug layer PNGs (MW morphology and/or cloud structure/emission/dust, extinction, resolved stars)."
     ),
     debug_grayscale_morphology: bool = typer.Option(
         False,
@@ -467,18 +586,237 @@ def generate(
         max=2.0,
         help="Off-plane/cosmic/halo star density [0–2]; blank=look default (~0.30 cinematic).",
     ),
-    guided: bool = typer.Option(
-        True,
-        "--guided/--no-guided",
+    save_as_default: bool = typer.Option(
+        False,
+        "--default",
         help=(
-            "Interactive prompts when no other flags are passed (default). "
-            "Any CLI flag skips guided and uses args + defaults. "
-            "Force with --guided; disable with --no-guided."
+            "Merge explicitly passed flags into .license defaults and exit "
+            "(does not render)."
+        ),
+    ),
+    show_defaults: bool = typer.Option(
+        False,
+        "--show-defaults",
+        help="Print custom (.license) and project built-in defaults, then exit.",
+    ),
+    guided: bool = typer.Option(
+        False,
+        "--guided",
+        help=(
+            "Force interactive fine-tuning of arguments (even when other flags "
+            "are set). Bare starsky-gen with no flags already enters guided; "
+            "any other flag uses CLI args + defaults."
         ),
     ),
 ) -> None:
-    # Resolve from argv so any real CLI flag skips guided (Typer default stays True).
+    """Compat alias: prefer bare ``starsky-gen`` (this command is hidden)."""
+    _run_generate(
+        ctx,
+        width=width,
+        height=height,
+        output_base_name=output_base_name,
+        output_dir=output_dir,
+        generations=generations,
+        seed=seed,
+        projection_mode=projection_mode,
+        cube=cube,
+        output_format=output_format,
+        scene_mode=scene_mode,
+        nebula_mode=nebula_mode,
+        quality=quality,
+        cubemap_face_size=cubemap_face_size,
+        stars=stars,
+        depth=depth,
+        nebula=nebula,
+        galaxy_view=galaxy_view,
+        background_gradient=background_gradient,
+        black_background=black_background,
+        jpeg_artifact_pass=jpeg_artifact_pass,
+        look_target=look_target,
+        long_exposure_look=long_exposure_look,
+        background_texture_strength=background_texture_strength,
+        nebula_style=nebula_style,
+        cloud_continuity=cloud_continuity,
+        dust_coverage=dust_coverage,
+        dust_strength=dust_strength,
+        nebula_hero_color=nebula_hero_color,
+        nebula_interact_density=nebula_interact_density,
+        nebula_interact_strength=nebula_interact_strength,
+        nebula_debug_pass=nebula_debug_pass,
+        render_profile=render_profile,
+        isolate_layer=isolate_layer,
+        debug_export_layers=debug_export_layers,
+        debug_grayscale_morphology=debug_grayscale_morphology,
+        morphology_void_strength=morphology_void_strength,
+        morphology_scar_strength=morphology_scar_strength,
+        noheroes=noheroes,
+        background_density=background_density,
+        save_as_default=save_as_default,
+        show_defaults=show_defaults,
+        guided=guided,
+    )
+
+
+def _run_generate(
+    ctx: typer.Context,
+    *,
+    width: int,
+    height: int,
+    output_base_name: str,
+    output_dir: Path,
+    generations: int,
+    seed: int | None,
+    projection_mode: ProjectionMode,
+    cube: bool,
+    output_format: OutputFormat,
+    scene_mode: SceneMode,
+    nebula_mode: NebulaMode,
+    quality: int,
+    cubemap_face_size: int,
+    stars: bool,
+    depth: bool,
+    nebula: bool,
+    galaxy_view: bool,
+    background_gradient: bool,
+    black_background: bool,
+    jpeg_artifact_pass: bool,
+    look_target: LookTarget,
+    long_exposure_look: bool,
+    background_texture_strength: float,
+    nebula_style: str,
+    cloud_continuity: float,
+    dust_coverage: float,
+    dust_strength: float,
+    nebula_hero_color: str,
+    nebula_interact_density: float | None,
+    nebula_interact_strength: float | None,
+    nebula_debug_pass: str,
+    render_profile: str,
+    isolate_layer: IsolateLayer,
+    debug_export_layers: bool,
+    debug_grayscale_morphology: bool,
+    morphology_void_strength: float,
+    morphology_scar_strength: float,
+    noheroes: bool,
+    background_density: float | None,
+    save_as_default: bool = False,
+    show_defaults: bool = False,
+    guided: bool = False,
+) -> None:
     _ = guided
+    want_default = bool(save_as_default)
+    want_show = bool(show_defaults)
+
+    kwargs: dict[str, Any] = {
+        "width": width,
+        "height": height,
+        "output_base_name": output_base_name,
+        "output_dir": output_dir,
+        "generations": generations,
+        "seed": seed,
+        "projection_mode": projection_mode,
+        "cube": cube,
+        "output_format": output_format,
+        "scene_mode": scene_mode,
+        "nebula_mode": nebula_mode,
+        "quality": quality,
+        "cubemap_face_size": cubemap_face_size,
+        "stars": stars,
+        "depth": depth,
+        "nebula": nebula,
+        "galaxy_view": galaxy_view,
+        "background_gradient": background_gradient,
+        "black_background": black_background,
+        "jpeg_artifact_pass": jpeg_artifact_pass,
+        "look_target": look_target,
+        "long_exposure_look": long_exposure_look,
+        "background_texture_strength": background_texture_strength,
+        "nebula_style": nebula_style,
+        "cloud_continuity": cloud_continuity,
+        "dust_coverage": dust_coverage,
+        "dust_strength": dust_strength,
+        "nebula_hero_color": nebula_hero_color,
+        "nebula_interact_density": nebula_interact_density,
+        "nebula_interact_strength": nebula_interact_strength,
+        "nebula_debug_pass": nebula_debug_pass,
+        "render_profile": render_profile,
+        "isolate_layer": isolate_layer,
+        "debug_export_layers": debug_export_layers,
+        "debug_grayscale_morphology": debug_grayscale_morphology,
+        "morphology_void_strength": morphology_void_strength,
+        "morphology_scar_strength": morphology_scar_strength,
+        "noheroes": noheroes,
+        "background_density": background_density,
+    }
+    present = provided_params_from_ctx(ctx)
+
+    if want_default:
+        updates = updates_from_kwargs(kwargs, present)
+        path = license_path()
+        state = save_cli_defaults(updates, path=path)
+        console.print(f"[dim]Saved defaults to[/dim] {path}")
+        if updates:
+            for key in sorted(updates):
+                console.print(f"  {key}: {format_defaults_value_markup(updates[key])}")
+            if state.cli_defaults and set(state.cli_defaults) - set(updates):
+                console.print("[dim]Merged with existing custom defaults.[/dim]")
+        else:
+            console.print(
+                "[dim]No generate flags on argv to merge "
+                "(pass options with --default, e.g. --mode nebula).[/dim]"
+            )
+        if want_show:
+            console.print("")
+            _print_show_defaults(license_file=path)
+        raise typer.Exit(0)
+
+    if want_show:
+        _print_show_defaults()
+        raise typer.Exit(0)
+
+    saved = load_cli_defaults()
+    if saved:
+        kwargs = apply_saved_defaults(kwargs, saved, provided=present)
+        width = kwargs["width"]
+        height = kwargs["height"]
+        output_base_name = kwargs["output_base_name"]
+        output_dir = Path(kwargs["output_dir"])
+        generations = kwargs["generations"]
+        seed = kwargs["seed"]
+        projection_mode = kwargs["projection_mode"]
+        cube = kwargs["cube"]
+        output_format = kwargs["output_format"]
+        scene_mode = kwargs["scene_mode"]
+        nebula_mode = kwargs["nebula_mode"]
+        quality = kwargs["quality"]
+        cubemap_face_size = kwargs["cubemap_face_size"]
+        stars = kwargs["stars"]
+        depth = kwargs["depth"]
+        nebula = kwargs["nebula"]
+        galaxy_view = kwargs["galaxy_view"]
+        background_gradient = kwargs["background_gradient"]
+        black_background = kwargs["black_background"]
+        jpeg_artifact_pass = kwargs["jpeg_artifact_pass"]
+        look_target = kwargs["look_target"]
+        long_exposure_look = kwargs["long_exposure_look"]
+        background_texture_strength = kwargs["background_texture_strength"]
+        nebula_style = kwargs["nebula_style"]
+        cloud_continuity = kwargs["cloud_continuity"]
+        dust_coverage = kwargs["dust_coverage"]
+        dust_strength = kwargs["dust_strength"]
+        nebula_hero_color = kwargs["nebula_hero_color"]
+        nebula_interact_density = kwargs["nebula_interact_density"]
+        nebula_interact_strength = kwargs["nebula_interact_strength"]
+        nebula_debug_pass = kwargs["nebula_debug_pass"]
+        render_profile = kwargs["render_profile"]
+        isolate_layer = kwargs["isolate_layer"]
+        debug_export_layers = kwargs["debug_export_layers"]
+        debug_grayscale_morphology = kwargs["debug_grayscale_morphology"]
+        morphology_void_strength = kwargs["morphology_void_strength"]
+        morphology_scar_strength = kwargs["morphology_scar_strength"]
+        noheroes = kwargs["noheroes"]
+        background_density = kwargs["background_density"]
+
     did_guided = False
     if should_run_guided():
         did_guided = True
@@ -607,6 +945,7 @@ def generate(
             cloud_continuity=cloud_continuity,
             dust_coverage=dust_coverage,
             dust_strength=dust_strength,
+            hero_color=nebula_hero_color,
             debug_pass=nebula_debug_pass,
         ),
         features=_feature_config_from_cli(
@@ -628,6 +967,8 @@ def generate(
             hero_star_enabled=not noheroes,
             background_star_density_scale=background_density,
             isolate_layer=isolate_layer,
+            nebula_interact_density=nebula_interact_density,
+            nebula_interact_strength=nebula_interact_strength,
         ),
     )
     cfg.output_dir.mkdir(parents=True, exist_ok=True)

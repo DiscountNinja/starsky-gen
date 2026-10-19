@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -20,6 +20,23 @@ PROMPT_EVERY_N = 20
 DEFAULT_STATUS: CopyrightStatus = "unknown"
 VALID_STATUSES: frozenset[str] = frozenset({"copyrighted", "open", "unknown"})
 
+# Top-level keys that belong to the legal section (not CLI defaults).
+_LEGAL_KEYS: frozenset[str] = frozenset(
+    {
+        "copyright_status",
+        "status",
+        "copyright",
+        "copyright_holder",
+        "copyright_year",
+        "distribution_rights",
+        "run_count",
+        "generation_count",
+        "last_prompt_at",
+        "seed",
+        "look_target",
+    }
+)
+
 
 @dataclass
 class LicenseState:
@@ -31,6 +48,7 @@ class LicenseState:
     last_prompt_at: int | None = None
     seed: int | None = None
     look_target: str | None = None
+    cli_defaults: dict[str, Any] = field(default_factory=dict)
 
     def resolved_year(self) -> int:
         if self.copyright_year is not None:
@@ -142,12 +160,43 @@ def _mirror_rights_for_status(status: CopyrightStatus) -> str:
     return "unknown"
 
 
+def _parse_cli_defaults(raw: object) -> dict[str, Any]:
+    """Normalize a defaults map to kebab-case keys with YAML-safe values."""
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not key.strip():
+            continue
+        kebab = key.strip().replace("_", "-")
+        if kebab in _LEGAL_KEYS or kebab.replace("-", "_") in _LEGAL_KEYS:
+            continue
+        if isinstance(value, (bool, int, float)) or value is None:
+            out[kebab] = value
+        elif isinstance(value, str):
+            out[kebab] = value
+        else:
+            # Paths / enums already stringified by saver; coerce unknowns.
+            out[kebab] = str(value)
+    return out
+
+
 def _state_from_mapping(raw: dict[str, Any]) -> LicenseState:
-    status = _normalize_status(raw.get("copyright_status", raw.get("status", DEFAULT_STATUS)))
+    # Nested ``legal`` block (sectioned format) or flat legacy keys.
+    legal_src: dict[str, Any]
+    nested_legal = raw.get("legal")
+    if isinstance(nested_legal, dict):
+        legal_src = dict(nested_legal)
+    else:
+        legal_src = {k: v for k, v in raw.items() if k != "defaults"}
+
+    status = _normalize_status(
+        legal_src.get("copyright_status", legal_src.get("status", DEFAULT_STATUS))
+    )
 
     # Legacy JSON used a free-form "copyright" string.
-    legacy = raw.get("copyright")
-    holder = _parse_optional_str(raw.get("copyright_holder"))
+    legacy = legal_src.get("copyright")
+    holder = _parse_optional_str(legal_src.get("copyright_holder"))
     if holder is None and isinstance(legacy, str) and legacy.strip():
         legacy_text = _parse_optional_str(legacy)
         if legacy_text is None:
@@ -163,16 +212,16 @@ def _state_from_mapping(raw: dict[str, Any]) -> LicenseState:
             cleaned = re.sub(r"^\d{4}\s+", "", cleaned).strip()
             holder = cleaned or legacy_text
 
-    run_count = _parse_optional_int(raw.get("run_count", raw.get("generation_count", 0))) or 0
+    run_count = _parse_optional_int(legal_src.get("run_count", legal_src.get("generation_count", 0))) or 0
     run_count = max(0, run_count)
-    year = _parse_optional_int(raw.get("copyright_year"))
+    year = _parse_optional_int(legal_src.get("copyright_year"))
     if year is None:
         year = current_year()
-    last_prompt_at = _parse_optional_int(raw.get("last_prompt_at"))
-    seed = _parse_optional_int(raw.get("seed"))
-    look_target = _parse_optional_str(raw.get("look_target"))
+    last_prompt_at = _parse_optional_int(legal_src.get("last_prompt_at"))
+    seed = _parse_optional_int(legal_src.get("seed"))
+    look_target = _parse_optional_str(legal_src.get("look_target"))
 
-    rights = _parse_optional_str(raw.get("distribution_rights"))
+    rights = _parse_optional_str(legal_src.get("distribution_rights"))
     if rights is None:
         # Legacy files: open/unknown mirror; copyrighted defaults to unknown.
         rights = _mirror_rights_for_status(status) if status in ("open", "unknown") else "unknown"
@@ -184,6 +233,8 @@ def _state_from_mapping(raw: dict[str, Any]) -> LicenseState:
     if status in ("open", "copyrighted") and last_prompt_at is None:
         last_prompt_at = run_count
 
+    cli_defaults = _parse_cli_defaults(raw.get("defaults"))
+
     return LicenseState(
         copyright_status=status,
         copyright_holder=holder if status == "copyrighted" else None,
@@ -193,6 +244,7 @@ def _state_from_mapping(raw: dict[str, Any]) -> LicenseState:
         last_prompt_at=last_prompt_at,
         seed=seed,
         look_target=look_target,
+        cli_defaults=cli_defaults,
     )
 
 
@@ -244,18 +296,69 @@ def save_license(state: LicenseState, path: Path | None = None) -> None:
         rights = status
     else:
         rights = (state.distribution_rights or "").strip() or "unknown"
-    payload = (
-        "# Local copyright / distribution preferences (gitignored)\n"
-        f"copyright_status: {status}  # copyrighted | open | unknown\n"
-        f"copyright_holder: {_yaml_scalar(holder if holder else None)}  # optional; copyrighted only\n"
-        f"copyright_year: {year}\n"
-        f"distribution_rights: {_yaml_scalar(rights)}\n"
-        f"run_count: {int(max(0, state.run_count))}\n"
-        f"seed: {_yaml_scalar(state.seed)}\n"
-        f"look_target: {_yaml_scalar(state.look_target)}\n"
-        f"last_prompt_at: {_yaml_scalar(state.last_prompt_at)}\n"
+    lines = [
+        "# Local starsky-gen preferences (gitignored)",
+        "",
+        "# legal",
+        f"copyright_status: {status}  # copyrighted | open | unknown",
+        f"copyright_holder: {_yaml_scalar(holder if holder else None)}  # optional; copyrighted only",
+        f"copyright_year: {year}",
+        f"distribution_rights: {_yaml_scalar(rights)}",
+        f"run_count: {int(max(0, state.run_count))}",
+        f"seed: {_yaml_scalar(state.seed)}",
+        f"look_target: {_yaml_scalar(state.look_target)}",
+        f"last_prompt_at: {_yaml_scalar(state.last_prompt_at)}",
+        "",
+        "# defaults",
+        "defaults:",
+    ]
+    defaults = _parse_cli_defaults(state.cli_defaults)
+    if not defaults:
+        lines.append("  {}")
+    else:
+        for key in sorted(defaults):
+            lines.append(f"  {key}: {_yaml_scalar(defaults[key])}")
+    lines.append("")
+    p.write_text("\n".join(lines), encoding="utf-8")
+
+
+def merge_cli_defaults(
+    state: LicenseState,
+    updates: dict[str, Any],
+) -> LicenseState:
+    """Return a copy of ``state`` with ``updates`` merged into ``cli_defaults``."""
+    merged = dict(state.cli_defaults)
+    merged.update(_parse_cli_defaults(updates))
+    return LicenseState(
+        copyright_status=state.copyright_status,
+        copyright_holder=state.copyright_holder,
+        copyright_year=state.copyright_year,
+        distribution_rights=state.distribution_rights,
+        run_count=state.run_count,
+        last_prompt_at=state.last_prompt_at,
+        seed=state.seed,
+        look_target=state.look_target,
+        cli_defaults=merged,
     )
-    p.write_text(payload, encoding="utf-8")
+
+
+def save_cli_defaults(
+    updates: dict[str, Any],
+    *,
+    path: Path | None = None,
+) -> LicenseState:
+    """Load `.license`, merge CLI defaults, persist, and return the new state."""
+    p = license_path() if path is None else Path(path)
+    state = load_license(p)
+    updated = merge_cli_defaults(state, updates)
+    save_license(updated, p)
+    return updated
+
+
+def load_cli_defaults(path: Path | None = None) -> dict[str, Any]:
+    """Return the kebab-case CLI defaults map from `.license` (empty if none)."""
+    p = license_path() if path is None else Path(path)
+    return dict(load_license(p).cli_defaults)
 
 
 def should_prompt(state: LicenseState, *, every_n: int = PROMPT_EVERY_N) -> bool:
@@ -347,6 +450,7 @@ def apply_status_choice(
     """Apply C/O/U choice. Unknown does not advance last_prompt_at (will re-prompt)."""
     status = _normalize_status(status)
     year_v = int(year) if year is not None else current_year()
+    defaults = dict(state.cli_defaults)
     if status == "unknown":
         return LicenseState(
             copyright_status="unknown",
@@ -357,6 +461,7 @@ def apply_status_choice(
             last_prompt_at=None,
             seed=state.seed,
             look_target=state.look_target,
+            cli_defaults=defaults,
         )
     if status == "open":
         return LicenseState(
@@ -368,6 +473,7 @@ def apply_status_choice(
             last_prompt_at=int(state.run_count),
             seed=state.seed,
             look_target=state.look_target,
+            cli_defaults=defaults,
         )
     # copyrighted — holder=None/blank means no name (© YEAR only).
     cleaned = (holder or "").strip() or None
@@ -381,6 +487,7 @@ def apply_status_choice(
         last_prompt_at=int(state.run_count),
         seed=state.seed,
         look_target=state.look_target,
+        cli_defaults=defaults,
     )
 
 
@@ -458,6 +565,9 @@ def record_generations(
         rights = (base.distribution_rights or "").strip() or "unknown"
         holder = base.copyright_holder
 
+    # Prefer existing file defaults; fall back to in-session state.
+    defaults = dict(current.cli_defaults) if current.cli_defaults else dict(state.cli_defaults)
+
     updated = LicenseState(
         copyright_status=status,
         copyright_holder=holder,
@@ -473,6 +583,7 @@ def record_generations(
             if look_target is not None
             else (state.look_target if state.look_target is not None else current.look_target)
         ),
+        cli_defaults=defaults,
     )
     save_license(updated, p)
     return updated

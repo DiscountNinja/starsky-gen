@@ -5,7 +5,7 @@ Low resolution sample:
 <img width="1024" height="512" alt="starsky-gen" src="https://github.com/user-attachments/assets/5cc44295-65b0-45b1-85ab-c474089b589a" />
 ## Features
 
-- Fully flag-driven Python CLI workflow (no interactive prompts).
+- Guided prompts by default (when you pass no flags) — best way to learn the CLI; full flag-driven mode for scripts.
 - **Cinematic look by default**: filmic tone, richer bloom, near-zero film grain, flat/wrap-safe exposure.
 - Realistic star and Milky Way color with magnitude/PSF stamping (sharp game stars, not stacked-photo noise).
 - Non-uniform, subtle star coloration with weighted distributions:
@@ -33,8 +33,27 @@ pip install -e ".[dev]"
 
 ## Run
 
+**Recommended first run — guided mode** (default when you pass no flags). Walks size, projection, scene, and look options interactively, shows the matching CLI flag at each step, then prints an equivalent command you can reuse:
+
 ```bash
 starsky-gen
+```
+
+Spam Enter for a full default run. Type `q` to cancel. After the summary, choose whether to start the render.
+
+Any CLI flag skips guided (unset options keep built-in or saved defaults). Use `--guided` to force interactive fine-tuning around flags you already passed:
+
+```bash
+starsky-gen --seed 42
+starsky-gen --width 4096
+starsky-gen --guided --seed 42   # prompts; seed pre-fills the default
+```
+
+Persist preferred flags in `.license` (saves and exits; no render). Later runs and guided prompts pick them up:
+
+```bash
+starsky-gen --default --mode nebula --nebula-style dramatic --nebula-hero-color gold
+starsky-gen --show-defaults
 ```
 
 Example with explicit options:
@@ -53,7 +72,7 @@ starsky-gen \
   --seed 42
 ```
 
-Optional interactive tuning:
+Optional score-and-tweak loop (separate from guided):
 
 ```bash
 starsky-gen assist
@@ -129,7 +148,10 @@ Look / galaxy tuning:
 Pipeline / morphology diagnostics:
 
 - `--render-profile` (`physical|physical_grade|full`, default `full`)
-- `--debug-layers` (write morphology, extinction, and star-layer PNGs under `<output-dir>/<name>_layers/`, including RGB `structure_type_map.png` — see [docs/usage.md](docs/usage.md#structure-architecture-weight--type-system))
+- `--guided` (force interactive fine-tuning even when other flags are set; bare `starsky-gen` already guides)
+- `--default` (merge explicitly passed flags into `.license` defaults and exit; does not render)
+- `--show-defaults` (print custom `.license` defaults vs project built-ins, then exit)
+- `--debug-layers` (write debug PNGs under `<output-dir>/<name>_layers/`: MW morphology and/or nebula `cloud_*` maps, extinction, resolved stars — see [docs/usage.md](docs/usage.md#debug--morphology-layers))
 - `--grayscale-morphology` (add `morphology_gray.png` to the layer export)
 - `--morphology-void-strength`, `--morphology-scar-strength`
 

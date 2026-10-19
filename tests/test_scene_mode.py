@@ -52,6 +52,48 @@ def test_finalize_nebula_scene_skips_mw_band_and_keeps_grade() -> None:
     assert 5 <= out.features.hero_star_count <= 8
     assert out.features.spike_max_count >= 6
     assert out.features.star_layer_bloom_strength >= 0.32
+    # Interactive Layer: stronger glow×emission mix in nebula scene.
+    assert abs(out.features.nebula_interact_density - 0.45) < 1e-6
+    assert abs(out.features.nebula_interact_strength - 0.35) < 1e-6
+
+
+def test_finalize_normal_weaker_nebula_interact() -> None:
+    cfg = RenderConfig(
+        scene_mode=SceneMode.normal,
+        features=FeatureConfig(look_target=LookTarget.cinematic),
+    )
+    out = finalize_render_config(cfg)
+    assert abs(out.features.nebula_interact_density - 0.65) < 1e-6
+    assert abs(out.features.nebula_interact_strength - 0.12) < 1e-6
+
+
+def test_nebula_interact_cli_override_survives_finalize() -> None:
+    cfg = RenderConfig(
+        scene_mode=SceneMode.nebula,
+        features=FeatureConfig(
+            look_target=LookTarget.cinematic,
+            nebula_interact_density=0.30,
+            nebula_interact_strength=0.50,
+        ),
+    )
+    out = finalize_render_config(cfg)
+    assert abs(out.features.nebula_interact_density - 0.30) < 1e-6
+    assert abs(out.features.nebula_interact_strength - 0.50) < 1e-6
+
+
+def test_nebula_interact_glow_rgb_gates_and_preserves_peak() -> None:
+    from starsky_gen.generator import _nebula_interact_glow_rgb
+
+    star = np.array([1.0, 0.85, 0.70], dtype=np.float64)
+    em = np.zeros((8, 8, 3), dtype=np.float64)
+    # Magenta emission at sample pixel.
+    em[3, 4] = np.array([0.9, 0.15, 0.85], dtype=np.float64)
+    cold = _nebula_interact_glow_rgb(star, em, 0, 0, density=0.45, strength=0.35)
+    assert float(np.max(np.abs(cold - star / np.max(star)))) < 1e-5
+    hot = _nebula_interact_glow_rgb(star, em, 3, 4, density=0.45, strength=0.35)
+    assert float(hot[0]) > float(cold[0]) * 0.9
+    assert float(hot[2]) > float(cold[2])
+    assert abs(float(np.max(hot)) - 1.0) < 1e-5
 
 
 def test_finalize_nebula_forces_galaxy_view_even_if_cli_disabled() -> None:
@@ -143,8 +185,78 @@ def test_cloud_complex_dramatic_richer_than_subtle() -> None:
     chroma_s = float(np.std(em_s, axis=2).mean())
     chroma_d = float(np.std(em_d, axis=2).mean())
     assert chroma_d >= chroma_s * 0.95
-    # Not a flat salmon field: blue channel has real mass.
-    assert float(em_d[..., 2].mean()) > 0.02
+    # Not a flat salmon field: blue channel has real mass in bright cores.
+    assert float(np.percentile(em_d[..., 2], 95)) > 0.04
+
+
+def test_cloud_complex_dramatic_has_hero_peak() -> None:
+    """Dramatic style concentrates emission into a readable hero body (not flat soup)."""
+    rng = np.random.default_rng(42)
+    struct, em, dust = build_cloud_complex_envelope(rng, 192, 384, style="dramatic")
+    lum = 0.2126 * em[..., 0] + 0.7152 * em[..., 1] + 0.0722 * em[..., 2]
+    p99 = float(np.percentile(lum, 99))
+    med = float(np.median(lum))
+    assert p99 > med * 2.5
+    assert float(struct.max()) > 0.55
+    # Dust carves through bright structure (lanes present).
+    assert float(dust.max()) > 0.12
+    assert float(dust.mean()) > 0.02
+
+
+def test_cloud_layer_interaction_gates_emission_to_dust_overlap() -> None:
+    """Emission survives where dust×structure overlap; dust has extinction range."""
+    rng = np.random.default_rng(42)
+    struct, em, dust = build_cloud_complex_envelope(rng, 160, 320, style="dramatic")
+    lum = 0.2126 * em[..., 0] + 0.7152 * em[..., 1] + 0.0722 * em[..., 2]
+    # Gated plate: most of the frame is dark; bright cores are sparse but photogenic.
+    assert float(np.percentile(lum, 50)) < float(np.percentile(lum, 95)) * 0.55
+    assert float(np.mean(lum > 0.08)) < 0.50
+    assert float(np.percentile(lum, 95)) > 0.25
+    # Warm chroma in bright cores (saturation finish).
+    hot = lum > np.percentile(lum, 92)
+    if np.any(hot):
+        assert float(em[hot, 0].mean()) >= float(em[hot, 2].mean()) * 0.85
+        assert float(dust[hot].mean()) > float(dust.mean()) * 0.90
+        assert float(struct[hot].mean()) > float(struct.mean()) * 0.85
+    # Dust has usable dynamic range for extinction (not a flat haze).
+    assert float(dust.max() - dust.min()) > 0.35
+    assert float(np.percentile(dust, 90)) > float(np.percentile(dust, 20)) + 0.12
+
+
+def test_nebula_hero_color_presets_shift_chroma() -> None:
+    from starsky_gen.cloud_complex import parse_nebula_hero_color
+
+    gold, key = parse_nebula_hero_color("gold")
+    assert key == "gold"
+    assert float(gold[0]) > float(gold[2])
+    gold2, key2 = parse_nebula_hero_color("gold-core")
+    assert key2 == "gold"
+    assert np.allclose(gold, gold2)
+    blue, key = parse_nebula_hero_color("cool-blue")
+    assert key == "blue"
+    assert float(blue[2]) > float(blue[0])
+    hex_rgb, key = parse_nebula_hero_color("#FC5656")
+    assert key == "custom"
+    assert float(hex_rgb[0]) > float(hex_rgb[1])
+    trip, key = parse_nebula_hero_color("255,80,40")
+    assert key == "custom"
+    assert float(trip[0]) > float(trip[1])
+
+    rng = np.random.default_rng(7)
+    _, em_g, _ = build_cloud_complex_envelope(
+        rng, 96, 192, style="dramatic", hero_color="gold"
+    )
+    rng = np.random.default_rng(7)
+    _, em_b, _ = build_cloud_complex_envelope(
+        rng, 96, 192, style="dramatic", hero_color="blue"
+    )
+    lum_g = em_g.mean(axis=2)
+    lum_b = em_b.mean(axis=2)
+    hot_g = lum_g > np.percentile(lum_g, 90)
+    hot_b = lum_b > np.percentile(lum_b, 90)
+    ratio_g = float(em_g[hot_g, 0].mean() / max(em_g[hot_g, 2].mean(), 1e-6))
+    ratio_b = float(em_b[hot_b, 0].mean() / max(em_b[hot_b, 2].mean(), 1e-6))
+    assert ratio_g > ratio_b
 
 
 def test_soft_squash_lat_spreads_near_pole() -> None:

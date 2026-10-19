@@ -577,11 +577,22 @@ def _export_morphology_debug_layers(
     morph_gas_struct: np.ndarray | None = None,
     band_bleed_env: np.ndarray | None = None,
     band_plan: BandPlan | None = None,
+    cloud_structure: np.ndarray | None = None,
+    cloud_emission: np.ndarray | None = None,
+    cloud_dust: np.ndarray | None = None,
 ) -> None:
     if not cfg.features.debug_export_layers and not cfg.features.debug_grayscale_morphology:
         return
     out_dir = cfg.output_dir / f"{base_name}_layers"
     out_dir.mkdir(parents=True, exist_ok=True)
+    if cloud_structure is not None:
+        _save_layer_u8(np.clip(cloud_structure, 0.0, 1.0), out_dir / "cloud_structure.png")
+    if cloud_emission is not None:
+        em = np.asarray(cloud_emission, dtype=np.float64)
+        peak = float(np.percentile(em, 99.5)) + 1e-8
+        _save_layer_rgb(np.clip(em / peak, 0.0, 1.0), out_dir / "cloud_emission.png")
+    if cloud_dust is not None:
+        _save_layer_u8(np.clip(cloud_dust, 0.0, 1.0), out_dir / "cloud_dust.png")
     if galactic is not None:
         maps = galactic.derived_maps()
         _save_layer_u8(maps["stellar_density"], out_dir / "density_G.png")
@@ -999,6 +1010,13 @@ def _extinction_from_dust_and_lane(
     cfg: RenderConfig,
 ) -> np.ndarray:
     base_extinction_strength = 0.56 if cfg.nebula_mode == NebulaMode.galaxy_streak else 0.38
+    floor = 0.06 if cfg.nebula_mode == NebulaMode.galaxy_streak else 0.10
+    # Cloud-complex / dust-primary plates: widen transmission range so lanes and
+    # edges actually darken (lane map is often empty under --mode nebula).
+    lane_p99 = float(np.percentile(np.asarray(lane_ext, dtype=np.float64), 99.0))
+    if lane_p99 < 0.05:
+        base_extinction_strength = max(base_extinction_strength, 0.82)
+        floor = min(floor, 0.035)
     extinction_strength = (
         base_extinction_strength * cfg.nebula_tuning.dust_strength * cfg.features.dust_opacity
     )
@@ -1008,7 +1026,6 @@ def _extinction_from_dust_and_lane(
         1.0,
     )
     lane_k = 0.34 + 0.20 * cfg.nebula_tuning.dust_strength if cfg.nebula_mode == NebulaMode.galaxy_streak else 0.0
-    floor = 0.06 if cfg.nebula_mode == NebulaMode.galaxy_streak else 0.10
     return np.clip(
         1.0 - dust_occlusion * extinction_strength - lane_boost * lane_k,
         floor,
@@ -2150,6 +2167,52 @@ def _paint_hero_wide_halo_and_airy(
     )
 
 
+def _nebula_interact_glow_rgb(
+    star_rgb: np.ndarray,
+    emission_rgb: np.ndarray | None,
+    yi: int,
+    xi: int,
+    *,
+    density: float,
+    strength: float,
+) -> np.ndarray:
+    """Lerp star glow chroma toward local emission (Nebula Interactive Layer).
+
+    ``density`` gates where mix applies (brighter emission → more mix).
+    ``strength`` scales how far glow leans toward nebula RGB. Cores stay spectral.
+    """
+    out = np.asarray(star_rgb, dtype=np.float64).reshape(-1)[:3].copy()
+    s = float(np.clip(strength, 0.0, 1.0))
+    if s < 1e-6 or emission_rgb is None:
+        return out
+    em = np.asarray(emission_rgb, dtype=np.float64)
+    if em.ndim != 3 or em.shape[2] < 3:
+        return out
+    h, w, _ = em.shape
+    yi_i = int(np.clip(yi, 0, h - 1))
+    xi_i = int(xi) % int(w)
+    local = em[yi_i, xi_i, :3]
+    luma = float(0.2126 * local[0] + 0.7152 * local[1] + 0.0722 * local[2])
+    # Density: higher value = stricter gate (need brighter emission to mix).
+    thr = float(np.clip(density, 0.05, 0.95))
+    # Smoothstep from ~thr*0.55 to thr*1.35
+    lo, hi = thr * 0.55, thr * 1.35
+    if luma <= lo:
+        gate = 0.0
+    elif luma >= hi:
+        gate = 1.0
+    else:
+        t = (luma - lo) / max(hi - lo, 1e-6)
+        gate = t * t * (3.0 - 2.0 * t)
+    mix = s * gate
+    if mix < 1e-5:
+        return out
+    neb = local / (float(np.max(local)) + 1e-8)
+    blended = out * (1.0 - mix) + neb * mix
+    peak = float(np.max(blended)) + 1e-8
+    return (blended / peak).astype(np.float64)
+
+
 def _add_stars_from_catalog(
     img: np.ndarray,
     rng: np.random.Generator,
@@ -2171,6 +2234,7 @@ def _add_stars_from_catalog(
     trail_angle_rad: float | None = None,
     population: Literal["cosmic", "halo", "galactic"] = "galactic",
     hero_records: list[HeroStarRecord] | None = None,
+    nebula_emission_rgb: np.ndarray | None = None,
 ) -> dict[str, dict[str, int]]:
     xs, ys = sph_to_equirect_xy(catalog["lon"], catalog["lat"], cfg.width, cfg.height)
     xf_coords, yf_coords = sph_to_equirect_xy_float(catalog["lon"], catalog["lat"], cfg.width, cfg.height)
@@ -2983,6 +3047,17 @@ def _add_stars_from_catalog(
                 glow_spectral = np.clip(spectral * (1.0 - glow_mix) + tint * glow_mix, 0.0, None)
                 gpeak = float(np.max(glow_spectral)) + 1e-8
                 glow_spectral = glow_spectral / gpeak
+            # Nebula Interactive Layer: tint glow/halo toward local emission (not cores).
+            interact_s = float(cfg.features.nebula_interact_strength)
+            if interact_s > 1e-6 and nebula_emission_rgb is not None:
+                glow_spectral = _nebula_interact_glow_rgb(
+                    glow_spectral,
+                    nebula_emission_rgb,
+                    yi_px,
+                    xi_px,
+                    density=float(cfg.features.nebula_interact_density),
+                    strength=interact_s,
+                )
             stamp_flux = flux_val / float(n_trail) if use_trail else flux_val
             for ti in range(n_trail):
                 t_off = 0.0
@@ -3032,7 +3107,9 @@ def _add_stars_from_catalog(
                         )
                     if do_spike:
                         # Thin 4-fold spokes — flux-scaled so arms survive display stretch.
-                        spike_rgb = np.clip(spectral, 0.0, 1.25)
+                        # Use glow chroma (Interactive Layer) so arms pick up local emission;
+                        # pinprick cores still stamp with spectral RGB.
+                        spike_rgb = np.clip(glow_spectral, 0.0, 1.25)
                         _paint_thin_diffraction_spikes(
                             img,
                             xi,
@@ -3206,7 +3283,10 @@ def render_single(
             cfg.width,
             periodic_x=wrap_lon_blur_x,
             style=str(getattr(cfg.nebula_tuning, "style", "balanced")),
+            hero_color=str(getattr(cfg.nebula_tuning, "hero_color", "magenta")),
         )
+    # Emission for Nebula Interactive Layer (updated again after nebula_bundle).
+    nebula_interact_rgb: np.ndarray | None = cloud_emission
     if mw_band and cfg.features.stars:
         _pk = _placement_kwargs(cfg.features)
         gen_phase = float(generation_index) * 0.173
@@ -3263,8 +3343,14 @@ def render_single(
         )
         disk_w = galactic.disk_weight
     elif scene_nebula and cloud_structure is not None:
-        # Soft full-sky host weight (not a midplane razor).
-        disk_w = np.clip(0.35 + 0.65 * cloud_structure, 0.0, 1.0)
+        # Host weight follows gated emission (no constant floor — that greys the whole FOV).
+        if cloud_emission is not None:
+            el = np.mean(np.asarray(cloud_emission, dtype=np.float64), axis=2)
+            peak = float(np.percentile(el, 99.5)) + 1e-8
+            el = np.clip(el / peak, 0.0, 1.0)
+            disk_w = np.clip(el * (0.40 + 0.60 * cloud_structure), 0.0, 1.0)
+        else:
+            disk_w = np.clip(cloud_structure, 0.0, 1.0)
     elif scene_nebula:
         # Nebula scene with gas off: flat host — never fall back to MW midplane
         # weight (that paints a grey haze band under black-background star tests).
@@ -3315,6 +3401,7 @@ def render_single(
             foreground_layer=False,
             population="cosmic",
             progress_cb=lambda p: _notify_stage("stars cosmic", p),
+            nebula_emission_rgb=nebula_interact_rgb,
         )
         stats = _merge_star_stats(stats, stats_cosmic)
         np.multiply(stars_cosmic, 0.78, out=stars_cosmic, casting="unsafe")
@@ -3377,17 +3464,10 @@ def render_single(
     if cfg.features.nebula and rich_nebula:
         _notify_stage("nebula prep", 0.0)
         if scene_nebula and cloud_emission is not None and cloud_dust is not None:
-            # Cloud-complex primary — avoid lat-biased NebulaMode.full fog scaffold.
-            struct = (
-                cloud_structure
-                if cloud_structure is not None
-                else np.mean(cloud_emission, axis=2)
-            )
-            neb0 = np.clip(
-                cloud_emission * 0.88 + struct[..., None] * 0.16, 0.0, 1.0
-            )
-            neb_emit0 = np.clip(cloud_emission * 0.90, 0.0, 1.0)
-            dust0 = np.clip(cloud_dust * 0.85, 0.0, 1.0)
+            # Cloud-complex primary — gated emission is the gas plate (no structure soup remix).
+            neb0 = np.clip(cloud_emission, 0.0, 1.0)
+            neb_emit0 = np.clip(cloud_emission * 0.96, 0.0, 1.0)
+            dust0 = np.clip(cloud_dust, 0.0, 1.0)
             lane0 = np.zeros((cfg.height, cfg.width), dtype=np.float64)
             _notify_stage("nebula prep", 0.85)
         else:
@@ -3413,6 +3493,9 @@ def render_single(
         _notify_stage("nebula prep", 0.90)
         nebula_bundle = (neb0, neb_emit0, dust0, lane0, ext0)
         _notify_stage("nebula prep", 1.0)
+
+    if nebula_bundle is not None:
+        nebula_interact_rgb = nebula_bundle[1]
 
     if cfg.features.stars:
         _notify_stage("stars background prep", 0.0)
@@ -3499,6 +3582,7 @@ def render_single(
                 point_disk_stars=False,
                 population="halo",
                 progress_cb=lambda p: _notify_stage("stars halo", p),
+                nebula_emission_rgb=nebula_interact_rgb,
             )
             stats = _merge_star_stats(stats, stats_halo)
             _notify_stage("stars halo", 1.0)
@@ -3653,6 +3737,7 @@ def render_single(
             galactic_structure=galactic,
             progress_cb=lambda p: _notify_stage("stars background", p * 0.78),
             hero_records=hero_records,
+            nebula_emission_rgb=nebula_interact_rgb,
             **_trail_kw,
         )
         if cfg.features.galaxy_view:
@@ -3693,6 +3778,7 @@ def render_single(
                 disk_w=None,
                 galactic_structure=galactic,
                 progress_cb=lambda p: _notify_stage("stars background", 0.78 + p * 0.18),
+                nebula_emission_rgb=nebula_interact_rgb,
                 **_trail_kw,
             )
             stats = _merge_star_stats(stats, stats_cl)
@@ -3774,6 +3860,7 @@ def render_single(
                 disk_w=disk_w if cfg.features.galaxy_view else None,
                 galactic_structure=galactic,
                 progress_cb=lambda p: _notify_stage("stars mid", p),
+                nebula_emission_rgb=nebula_interact_rgb,
                 **_trail_kw,
             )
             stats = _merge_star_stats(stats, stats_mid)
@@ -3894,6 +3981,7 @@ def render_single(
                 population="cosmic",
                 progress_cb=lambda p: _notify_stage("stars heroes only", p),
                 hero_records=hero_records,
+                nebula_emission_rgb=nebula_interact_rgb,
             )
         _notify_stage("stars heroes only", 1.0)
 
@@ -3934,16 +4022,9 @@ def render_single(
             neb, neb_emit, dust_occlusion, lane_ext, extinction = nebula_bundle
         else:
             if scene_nebula and cloud_emission is not None and cloud_dust is not None:
-                struct = (
-                    cloud_structure
-                    if cloud_structure is not None
-                    else np.mean(cloud_emission, axis=2)
-                )
-                neb = np.clip(
-                    cloud_emission * 0.88 + struct[..., None] * 0.16, 0.0, 1.0
-                )
-                neb_emit = np.clip(cloud_emission * 0.90, 0.0, 1.0)
-                dust_occlusion = np.clip(cloud_dust * 0.85, 0.0, 1.0)
+                neb = np.clip(cloud_emission, 0.0, 1.0)
+                neb_emit = np.clip(cloud_emission * 0.96, 0.0, 1.0)
+                dust_occlusion = np.clip(cloud_dust, 0.0, 1.0)
                 lane_ext = np.zeros((cfg.height, cfg.width), dtype=np.float64)
             else:
                 neb, neb_emit, dust_occlusion, lane_ext = generate_nebula(
@@ -4297,6 +4378,10 @@ def render_single(
         if dust_primary:
             av_scale *= float(cfg.features.morphology_extinction_av_scale) * 0.58
             fill_suppress = float(cfg.features.morphology_extinction_fill_suppress) * 0.88
+        elif scene_nebula:
+            # Cloud-complex: extinction darkens lanes; skip MW dust backlight soup fill.
+            fill_suppress = 0.12
+            av_scale = max(av_scale, 1.35)
         canvas = _apply_extinction_to_canvas(
             canvas,
             ext_paint,
@@ -4325,6 +4410,9 @@ def render_single(
                 * float(cfg.features.nebula_color_strength)
                 * float(np.clip(0.88 + 0.22 * ism_dom, 0.88, 1.35))
             )
+        if scene_nebula:
+            # Cloud-complex plate: keep radiance near unity so grade doesn't inflate soup.
+            neb_rad_scale = float(np.clip(neb_rad_scale, 0.85, 1.15))
         if dust_primary and galactic is not None and cfg.features.galaxy_view:
             from starsky_gen.structure_envelope import (
                 build_morphology_ism_layers,
@@ -4453,7 +4541,12 @@ def render_single(
         if _dw_vis.shape != (cfg.height, cfg.width):
             _dw_vis = np.broadcast_to(_dw_vis, (cfg.height, cfg.width))
         # Softer vertical gate so gas fills the band envelope, not a razor-thin row.
-        density_gate = np.clip(_dw_vis**1.38, 0.0, 1.0)
+        # Nebula scene: gate on emission luma (already dust×structure gated) — avoid
+        # a midplane floor that re-fills the whole FOV with soup.
+        if scene_nebula:
+            density_gate = np.clip(neb_luma**0.72 * (0.55 + 0.45 * neb_peaks), 0.0, 1.0)
+        else:
+            density_gate = np.clip(_dw_vis**1.38, 0.0, 1.0)
         gas_visibility = np.clip(
             (neb_luma**0.48) * (0.82 + 0.62 * neb_peaks) * density_gate,
             0.0,
@@ -4489,18 +4582,18 @@ def render_single(
             )
             neb_struct = np.clip(1.0 + 0.22 * morph_gas_struct * density_gate, 0.88, 1.08)
         elif scene_nebula:
-            # Filtered white FBM — value-grid FBM leaves vertical cell-edge corduroy.
+            # Mild modulation only — gated cloud_emission already carries soft structure.
             from starsky_gen.cloud_complex import _filtered_white_fbm
 
             neb_struct = _filtered_white_fbm(
                 rng_nebula,
                 cfg.height,
                 cfg.width,
-                octaves=3,
-                base_sigma=max(5.0, 0.014 * float(cfg.width)),
+                octaves=2,
+                base_sigma=max(8.0, 0.022 * float(cfg.width)),
                 periodic_x=wrap_lon_blur_x,
             )
-            neb_struct = np.clip(0.975 + 0.040 * neb_struct, 0.965, 1.035)
+            neb_struct = np.clip(0.992 + 0.016 * neb_struct, 0.985, 1.015)
         elif dust_primary:
             from starsky_gen.procedural_noise import _resize_bilinear as _rz, fbm2d
 
@@ -4888,6 +4981,7 @@ def render_single(
                     return _gauss_sc(field, 0.55 + 0.45 * float(passes), periodic_x=periodic_x)
 
                 _scatter_blur = _iso_blur
+                scatter_s *= 0.28
             else:
                 _scatter_blur = _blur_separable_xy
             canvas = forward_scatter_mie(
@@ -5167,7 +5261,13 @@ def render_single(
                 plane_gate=plane_gate,
                 strength=0.62,
             )
-        if cfg.features.galaxy_view and cfg.features.nebula and disk_w is not None:
+        if (
+            cfg.features.galaxy_view
+            and cfg.features.nebula
+            and disk_w is not None
+            and not scene_nebula
+        ):
+            # MW band ISM lift — skip in nebula scene (would grey the full FOV via disk_w).
             ism_lift_luma = (
                 morph_ism_luma
                 if morph_ism_luma is not None and dust_primary
@@ -5316,6 +5416,7 @@ def render_single(
             extinction_for_stars=ext_paint_for_fg,
             galactic_structure=galactic,
             progress_cb=lambda p: _notify_stage("stars foreground", p),
+            nebula_emission_rgb=nebula_interact_rgb,
         )
         stats = _merge_star_stats(stats, stats_fg)
         if cfg.features.galaxy_view:
@@ -6062,6 +6163,32 @@ def render_single(
                 )
         canvas = ensure_hdr(np.clip(canvas, 0.0, 1.0))
 
+    # Nebula on black: grade/ISM lifts voids to mid-grey — remask to gated emission.
+    if (
+        scene_nebula
+        and cfg.features.black_background
+        and cloud_emission is not None
+        and getattr(cfg.features, "isolate_layer", IsolateLayer.none) in (None, IsolateLayer.none)
+    ):
+        el = np.mean(np.asarray(cloud_emission, dtype=np.float64), axis=2)
+        peak = float(np.percentile(el, 99.5)) + 1e-8
+        gate = np.clip(el / peak, 0.0, 1.0)
+        from starsky_gen.cloud_complex import _gauss_float as _gauss_void
+
+        gate = np.clip(
+            gate * 0.55 + _gauss_void(gate, 2.8, periodic_x=wrap_lon_blur_x) * 0.45,
+            0.0,
+            1.0,
+        )
+        # Softer power so bright cores survive remask; voids still crush to near-black.
+        gate = np.clip(gate ** 0.62, 0.0, 1.0)
+        # Deeper cinematic field: darken + desaturate outside emission so nebula pops.
+        outside = np.clip(1.0 - gate, 0.0, 1.0)[..., np.newaxis]
+        lu = 0.2126 * canvas[..., 0] + 0.7152 * canvas[..., 1] + 0.0722 * canvas[..., 2]
+        desat = canvas * (1.0 - 0.72 * outside) + lu[..., np.newaxis] * (0.72 * outside)
+        canvas = np.clip(desat * (0.008 + 0.992 * gate[..., np.newaxis]), 0.0, 1.0)
+        canvas = ensure_hdr(canvas)
+
     # Isolate one layer onto black for compositing plates.
     iso = getattr(cfg.features, "isolate_layer", IsolateLayer.none)
     if iso is not None and iso != IsolateLayer.none:
@@ -6146,9 +6273,7 @@ def render_single(
         saved["equirectangular"] = eq_path
         _notify_stage("save equirectangular", 1.0)
 
-    if cfg.features.galaxy_view and (
-        cfg.features.debug_export_layers or cfg.features.debug_grayscale_morphology
-    ):
+    if cfg.features.debug_export_layers or cfg.features.debug_grayscale_morphology:
         _export_morphology_debug_layers(
             cfg,
             base_name,
@@ -6162,6 +6287,9 @@ def render_single(
             morph_gas_struct=morph_gas_struct,
             band_bleed_env=debug_band_bleed_env,
             band_plan=band_plan,
+            cloud_structure=cloud_structure,
+            cloud_emission=cloud_emission,
+            cloud_dust=cloud_dust,
         )
 
     if cfg.projection_mode in {ProjectionMode.cubemap, ProjectionMode.both}:

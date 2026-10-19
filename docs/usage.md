@@ -18,22 +18,31 @@ Background is a noisy bluish-gray field that darkens away from the galactic disk
 Under `--mode nebula`, guided skips the Galaxy view prompt (band is already off). Grade/photoreal still use an internal `galaxy_view` path. Layer toggles (`--no-stars`, `--no-nebula`, `--noheroes`, `--background-density 0`) are honored. Use `--nebula-style dramatic` to densify dust and push multi-hue emission on the cloud-complex path.
 
 ```bash
-starsky-gen --no-guided --mode normal --seed 1
-starsky-gen --no-guided --mode nebula --seed 1
-starsky-gen generate --mode nebula --nebula-mode full --nebula-style dramatic --seed 42
+starsky-gen --mode normal --seed 1
+starsky-gen --mode nebula --seed 1
+starsky-gen --mode nebula --nebula-mode full --nebula-style dramatic --seed 42
 ```
+
+### Persist CLI defaults (`--default` / `--show-defaults`)
+
+Save preferred flags into the local `.license` file (gitignored) under a `defaults` section. Saving exits without rendering:
+
+```bash
+starsky-gen --default --mode nebula --nebula-style dramatic --nebula-hero-color gold
+starsky-gen --show-defaults   # custom (.license) vs project built-in assumptions
+```
+
+Later runs (and guided prompts) use those custom defaults unless you override the same flag on the CLI. Combine `--default` with `--show-defaults` to save and immediately verify.
 
 ### Guided / discovery mode (default when no flags)
 
 ```bash
 starsky-gen                 # guided (no other flags)
-starsky-gen generate
 starsky-gen --width 4096    # not guided: flag → args + defaults for the rest
-starsky-gen --no-guided     # skip prompts explicitly
 starsky-gen --guided --seed 7   # force guided; seed pre-fills the prompt default
 ```
 
-Walks generate options interactively when you pass **no** CLI flags (newbie-friendly / discovery). If you pass any flag, guided is skipped and unset options keep their normal defaults. **Enter** keeps the current/default at every guided step — spam Enter for a full default run.
+Walks options interactively when you pass **no** CLI flags (newbie-friendly / discovery). If you pass any flag, guided is skipped and unset options keep their normal (or saved `.license`) defaults. Pass `--guided` to fine-tune interactively even when other flags are set. **Enter** keeps the current/default at every guided step — spam Enter for a full default run.
 
 1. **Size preset** — 2K (2048×1024), 4K (4096×2048), 8K (8192×4096), or custom `--width` / `--height`
 2. **Output type** — equirectangular, cubemap, or both (`--projection-mode`)
@@ -53,7 +62,7 @@ Before generate runs, starsky-gen may ask for copyright / distribution status to
 2. If **O** or **U** — no further prompts in that session; both Copyright and License metadata use `open` / `unknown`
 3. If **C** — asks **distribution rights / license** (free text, e.g. `All Rights Reserved`, `CC BY 4.0`), then an **optional copyright holder** name (Enter → `© YEAR` only)
 
-Once **open** or **copyrighted** is saved, generate does not ask again. **Unknown** (or Enter) re-asks next generate — a light legal nudge, not a recurring interrupt. The local YAML `.license` file stores status, optional holder, year, `distribution_rights`, run count, and last seed / look target; it is gitignored.
+Once **open** or **copyrighted** is saved, generate does not ask again. **Unknown** (or Enter) re-asks next generate — a light legal nudge, not a recurring interrupt. The local YAML `.license` file stores legal status (optional holder, year, `distribution_rights`, run count, last seed / look target) plus optional CLI `defaults` from `--default`; it is gitignored.
 
 Equivalent module invocation:
 
@@ -125,16 +134,17 @@ Cinematic prioritizes **volumetric glow + color hierarchy**. BandPlan still driv
 - `--nebula` / `--no-nebula` — gas; when off, guided skips nebula-mode/style/dust prompts
 - `--background-density` — off-plane/cosmic/halo **star** density `[0–2]` (0 = none); blank = look default
 - `--cloud-continuity` `[0–1.6]`, `--dust-coverage` `[0–1.6]`, `--dust-strength` `[0–1.8]` (0 = off/none)
+- `--nebula-hero-color` — hero nebula tint (`--mode nebula`): `classic-red`/`red`, `gold-core`/`gold`, `cool-blue`/`blue`, `magenta-accent`/`magenta`, `neutral`; or hex with/without `#` (`FC5656` or `#FC5656`) / `R,G,B`. In bash, use `FC5656` unquoted or quote `'#FC5656'` (`#` starts a comment).
 - `--depth` / `--no-depth` — dim catalog stars toward poles (not camera DOF)
 - `--render-profile` — `physical` = linear only; `physical_grade` = +grade; `full` = +display finish/grain
 - `--isolate-layer` — final plate on black: `none` | `background_stars` | `heroes` | `nebula_gas`
 
 ```bash
 # Black nebula + heroes only
-starsky-gen --no-guided --mode nebula --black-background --no-stars --nebula \
+starsky-gen --mode nebula --black-background --no-stars --nebula \
   --seed 42 --isolate-layer none
 # Heroes plate only
-starsky-gen --no-guided --mode nebula --no-stars --isolate-layer heroes --seed 42
+starsky-gen --mode nebula --no-stars --isolate-layer heroes --seed 42
 ```
 
 Key knobs:
@@ -156,7 +166,15 @@ starsky-gen --seed 42 --debug-layers -o output
 starsky-gen --seed 42 --debug-layers --grayscale-morphology -o output
 ```
 
-Writes `output/<output-base-name>_layers/` with PNGs such as `density_G.png`, `dust_D.png`, `unresolved_U.png`, `resolve_W.png`, `dropout_mask.png`, `extinction.png`, `obliteration_mask.png`, `brutal_erasure_mask.png`, `structure_survival.png`, `gold_population_weight.png`, `resolved_stars.png`, and (when BandPlan is built) `band_plan_lane.png` / `band_plan_rift.png` / `band_plan_protect.png` / `band_plan_shell.png`.
+Writes `output/<output-base-name>_layers/` with PNGs such as:
+
+- **Any scene:** `extinction.png`, `resolved_stars.png`
+- **`--mode nebula`:** `cloud_structure.png`, `cloud_emission.png`, `cloud_dust.png`
+- **`--mode normal` (MW morphology):** `density_G.png`, `dust_D.png`, `unresolved_U.png`, `resolve_W.png`, `dropout_mask.png`, and related architecture / band-plan plates when built
+
+```bash
+starsky-gen --mode nebula --no-stars --debug-layers --seed 42 -o output
+```
 
 ### Structure architecture (weight / type system)
 

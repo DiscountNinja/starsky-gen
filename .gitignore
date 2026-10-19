@@ -5,3 +5,5 @@ __pycache__/
 /output/
 /output/**
 .license
+.cursor/*.log
+.cursor/debug*.log

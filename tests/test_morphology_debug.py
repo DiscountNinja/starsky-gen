@@ -2,16 +2,29 @@
 
 Visual validation::
 
-    PYTHONPATH=src python3 -m starsky_gen.cli generate \\
+    PYTHONPATH=src python3 -m starsky_gen.cli \\
         --debug-layers --grayscale-morphology --seed 42
 
 Inspect ``{output}_layers/morphology_gray.png``, ``unresolved_deposit.png``,
-``dropout_mask.png``, and ``extinction.png``.
+``dropout_mask.png``, and ``extinction.png``. Under ``--mode nebula`` also
+``cloud_structure.png`` / ``cloud_emission.png`` / ``cloud_dust.png``.
 """
+
+from pathlib import Path
 
 import numpy as np
 
 from starsky_gen.color_science import star_chromatic_perturb_weight
+from starsky_gen.config import (
+    FeatureConfig,
+    LookTarget,
+    NebulaMode,
+    OutputFormat,
+    ProjectionMode,
+    RenderConfig,
+    SceneMode,
+    finalize_render_config,
+)
 from starsky_gen.galactic_structure import (
     GalacticMorphology,
     apply_unresolved_field_to_canvas,
@@ -20,6 +33,7 @@ from starsky_gen.galactic_structure import (
     morphology_grayscale_preview,
     resolved_keep_probability,
 )
+from starsky_gen.generator import render_single
 from starsky_gen.psf import flux_from_mag, sample_psf_fwhm_scale
 
 
@@ -178,3 +192,39 @@ def test_deposit_primary_unresolved_path_runs() -> None:
         canvas, rng, m, texture_strength=1.0, deposit_primary=True
     )
     assert float(out.max()) > 0.0
+
+
+def test_nebula_debug_layers_export_cloud_maps(tmp_path: Path) -> None:
+    cfg = RenderConfig(
+        width=256,
+        height=128,
+        seed=42,
+        generations=1,
+        output_dir=tmp_path,
+        output_base_name="neb_dbg",
+        output_format=OutputFormat.png,
+        projection_mode=ProjectionMode.equirectangular,
+        scene_mode=SceneMode.nebula,
+        nebula_mode=NebulaMode.full,
+        features=FeatureConfig(
+            look_target=LookTarget.cinematic,
+            stars=False,
+            hero_star_enabled=False,
+            nebula=True,
+            black_background=True,
+            background_gradient=False,
+            debug_export_layers=True,
+        ),
+    )
+    saved, _ = render_single(finalize_render_config(cfg), 0)
+    assert "equirectangular" in saved
+    layer_dir = tmp_path / "neb_dbg_0000_layers"
+    assert layer_dir.is_dir()
+    for name in (
+        "cloud_structure.png",
+        "cloud_emission.png",
+        "cloud_dust.png",
+        "extinction.png",
+        "resolved_stars.png",
+    ):
+        assert (layer_dir / name).is_file(), name

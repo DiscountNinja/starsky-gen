@@ -38,20 +38,16 @@ _KNOWN_SUBCOMMANDS = frozenset({"generate", "assist"})
 def should_run_guided(argv: Sequence[str] | None = None) -> bool:
     """Whether to enter guided prompts for this invocation.
 
-    - Bare ``starsky-gen`` / ``starsky-gen generate`` → guided (newbie default).
-    - Any ``-``/``--`` flag other than an explicit ``--guided`` → not guided
+    - Bare ``starsky-gen`` (or legacy ``starsky-gen generate``) → guided.
+    - Any ``-``/``--`` flag other than ``--guided`` → not guided
       (CLI args + defaults for everything else).
-    - ``--guided`` forces guided even when other flags are present.
-    - ``--no-guided`` always disables guided.
+    - ``--guided`` forces guided even when other flags are present (fine-tune args).
     """
     tokens = list(sys.argv[1:] if argv is None else argv)
     if tokens and tokens[0] in _KNOWN_SUBCOMMANDS:
         tokens = tokens[1:]
 
-    has_no_guided = any(t == "--no-guided" or t.startswith("--no-guided=") for t in tokens)
     has_guided = any(t == "--guided" or t.startswith("--guided=") for t in tokens)
-    if has_no_guided:
-        return False
     if has_guided:
         return True
     if any(t.startswith("-") for t in tokens):
@@ -427,7 +423,7 @@ GUIDED_FIELDS: list[GuidedField] = [
         "debug_export_layers",
         "--debug-layers",
         "Export debug layers",
-        "Write morphology/star/extinction layer PNGs.",
+        "Write debug layer PNGs (MW morphology and/or cloud maps, extinction, stars).",
         "bool",
         False,
         group="advanced",
@@ -733,9 +729,9 @@ def format_equivalent_command(
     *,
     stock: dict[str, Any] | None = None,
 ) -> str:
-    """Build ``starsky-gen generate …`` with only non-stock flags."""
+    """Build ``starsky-gen …`` with only non-stock flags."""
     base = stock if stock is not None else STOCK_DEFAULTS
-    parts: list[str] = ["starsky-gen", "generate"]
+    parts: list[str] = ["starsky-gen"]
     by_key = {f.key: f for f in GUIDED_FIELDS}
     for key, stock_default in base.items():
         if key not in values:
