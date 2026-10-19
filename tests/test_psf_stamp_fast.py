@@ -33,18 +33,22 @@ def _stamp_meshgrid_reference(
     yi_row = iy0 + np.arange(kh, dtype=np.float64)
     xi_col = ix0 + np.arange(kw, dtype=np.float64)
     yy_grid, xx_grid = np.meshgrid(yi_row, xi_col, indexing="ij")
-    vy = (yy_grid >= 0) & (yy_grid < h)
-    yy_i = np.clip(np.round(yy_grid).astype(np.int64), 0, h - 1)
+    yy_i = np.round(yy_grid).astype(np.int64)
+    vy = (yy_grid >= 0) & (yy_grid < h) & (yy_i >= 0) & (yy_i < h)
+    fade = 3.0 if h > 16 else 1.5
+    dist = np.minimum(yy_i.astype(np.float64), float(h - 1) - yy_i.astype(np.float64))
+    edge_w = np.clip(dist / fade, 0.0, 1.0)
+    edge_w = edge_w * edge_w * (3.0 - 2.0 * edge_w)
     if periodic_x:
         xp_grid = np.mod(np.round(xx_grid).astype(np.int64), wd)
         ii, jj = np.nonzero(vy)
-        canvas[yy_i[ii, jj], xp_grid[ii, jj]] += patch[ii, jj]
+        canvas[yy_i[ii, jj], xp_grid[ii, jj]] += patch[ii, jj] * edge_w[ii, jj][:, None]
     else:
         sel = vy & (xx_grid >= 0) & (xx_grid < wd)
         ii, jj = np.nonzero(sel)
-        canvas[yy_i[ii, jj], np.clip(np.round(xx_grid[ii, jj]).astype(np.int64), 0, wd - 1)] += patch[
-            ii, jj
-        ]
+        canvas[yy_i[ii, jj], np.clip(np.round(xx_grid[ii, jj]).astype(np.int64), 0, wd - 1)] += (
+            patch[ii, jj] * edge_w[ii, jj][:, None]
+        )
 
 
 def test_stamp_psf_patch_matches_meshgrid_reference() -> None:

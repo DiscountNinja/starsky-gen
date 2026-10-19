@@ -17,21 +17,79 @@ from starsky_gen.color_science import (
 )
 from starsky_gen.photometry import sample_apparent_magnitudes_imf, sample_apparent_magnitudes_lf
 from starsky_gen.placement import (
+    EQUIRECT_LAT_POLE_MARGIN_FULL_SKY,
+    EQUIRECT_POLE_TAPER_FRAC,
+    equirect_pole_edge_margin,
     lat_equirect_clip_bounds,
     sample_galactic_disk_lon_lat_v2,
     sample_hierarchical_poisson_field,
     sample_smooth_poisson_field,
+    soft_squash_lat,
 )
 from starsky_gen.projections import sph_to_equirect_xy
 
 STAR_COLOR_NAMES = ["white", "blue", "yellow", "red"]
-STAR_COLOR_WEIGHTS = np.array([0.54, 0.17, 0.16, 0.13], dtype=np.float64)
+STAR_COLOR_WEIGHTS = np.array([0.58, 0.20, 0.16, 0.06], dtype=np.float64)
 STAR_SIZE_NAMES = ["tiny", "small", "medium", "large"]
-# Tiny-heavy cinematic hierarchy: most stars are faint texture; rare medium/large glow.
-STAR_SIZE_WEIGHTS = np.array([0.86, 0.11, 0.02, 0.01], dtype=np.float64)
+# Tiny-heavy cinematic hierarchy: vast faint texture; rare medium/large glow anchors.
+STAR_SIZE_WEIGHTS = np.array([0.90, 0.085, 0.012, 0.003], dtype=np.float64)
 
 _LAT_CLIP_LO, _LAT_CLIP_HI = lat_equirect_clip_bounds()
 _MAX_EQUIRECT_LAT = _LAT_CLIP_HI
+
+
+def _lat_clip_pair(*, pole_margin: float | None = None) -> tuple[float, float, float]:
+    """Return (lat_lo, lat_hi, max_abs_lat) for equirect sampling."""
+    lo, hi = lat_equirect_clip_bounds(pole_margin=pole_margin)
+    return float(lo), float(hi), float(hi)
+
+
+def _bound_lat(lat: np.ndarray, *, pole_margin: float | None = None) -> np.ndarray:
+    """Keep latitudes inside equirect-safe bounds.
+
+    Full-sky / nebula plates use a hard clip (soft tanh squash piles near-pole
+    mass onto one shelf latitude a few dozen rows in from the Y border).
+    MW-band placements keep the soft squash for the wider default margin.
+    Prefer ``_sample_isotropic_lat`` for new sphere samples so mass is not
+    collapsed onto the clip latitude.
+    """
+    if pole_margin is not None and float(pole_margin) <= EQUIRECT_LAT_POLE_MARGIN_FULL_SKY + 1e-9:
+        lo, hi, _ = _lat_clip_pair(pole_margin=pole_margin)
+        return np.clip(lat, lo, hi)
+    if pole_margin is not None:
+        return soft_squash_lat(lat, pole_margin=pole_margin)
+    lo, hi, _ = _lat_clip_pair(pole_margin=pole_margin)
+    return np.clip(lat, lo, hi)
+
+
+def _sample_isotropic_lat(
+    rng: np.random.Generator,
+    n: int,
+    *,
+    pole_margin: float | None = None,
+    height: int | None = None,
+) -> np.ndarray:
+    """Uniform-on-sphere latitudes, conditioned to stay off equirect pole rows.
+
+    Samples ``sin(lat) ~ U(sin(lo), sin(hi))`` so density stays isotropic on the
+    allowed band without clipping a pile onto one shelf latitude.
+    When ``height`` is set, use a ~1.5px edge margin (not a large glow inset) so
+    poles stay populated; stamp edge-fade softens truncated bloom.
+    """
+    # Prefer ~1.5px edge when height is known — large FULL_SKY margins shelf at low res.
+    if height is not None and height > 1:
+        margin = equirect_pole_edge_margin(height)
+    elif pole_margin is None:
+        margin = EQUIRECT_LAT_POLE_MARGIN_FULL_SKY
+    else:
+        margin = pole_margin
+    lo, hi, _ = _lat_clip_pair(pole_margin=margin)
+    u_lo = float(np.sin(lo))
+    u_hi = float(np.sin(hi))
+    if u_hi <= u_lo + 1e-12:
+        return np.full(int(n), 0.0, dtype=np.float64)
+    u = rng.uniform(u_lo, u_hi, size=int(n))
+    return np.arcsin(u).astype(np.float64)
 
 # B–V bins for stats / heuristics (rough Johnson B–V).
 _BV_BLUE_MAX = 0.12
@@ -259,6 +317,7 @@ def sample_isotropic_cosmic_catalog(
     anchor_count: int = 6,
     anchor_mag_bright: float = 4.8,
     anchor_mag_faint: float = 8.4,
+    pole_margin: float | None = None,
 ) -> dict[str, np.ndarray]:
     """Population A: uniform sphere — independent of galactic morphology."""
     area = width * height
@@ -267,8 +326,8 @@ def sample_isotropic_cosmic_catalog(
         int(area / 40.0 * density_scale * float(np.clip(density_scale_mult, 0.05, 2.5))),
     )
     lon = rng.uniform(0.0, 2.0 * np.pi, size=n)
-    lat = np.arcsin(rng.uniform(-1.0, 1.0, size=n)) * (_MAX_EQUIRECT_LAT / (0.5 * np.pi))
-    lat = np.clip(lat, _LAT_CLIP_LO, _LAT_CLIP_HI)
+    # Isotropic on the sphere, kept off equirect pole rows (no clip shelf).
+    lat = _sample_isotropic_lat(rng, n, pole_margin=pole_margin, height=height)
     # Almost all tiny/cool — sparse cinematic voids, not a busy field.
     size_p = np.array([0.94, 0.055, 0.004, 0.001], dtype=np.float64)
     size_p /= size_p.sum()
@@ -298,11 +357,7 @@ def sample_isotropic_cosmic_catalog(
     na = int(np.clip(anchor_count, 0, 24))
     if na > 0:
         lon_a = rng.uniform(0.0, 2.0 * np.pi, size=na)
-        lat_a = np.clip(
-            np.arcsin(rng.uniform(-1.0, 1.0, size=na)) * (_MAX_EQUIRECT_LAT / (0.5 * np.pi)),
-            _LAT_CLIP_LO,
-            _LAT_CLIP_HI,
-        )
+        lat_a = _sample_isotropic_lat(rng, na, pole_margin=pole_margin, height=height)
         anchor: dict[str, np.ndarray] = {
             "lon": lon_a,
             "lat": lat_a,
@@ -339,6 +394,8 @@ def sample_halo_star_catalog(
     photometry_mag_faint: float = 20.0,
     photometry_ultra_cut: float = 7.8,
     max_ultra_bright_stars: int = 4,
+    pole_margin: float | None = None,
+    isotropic_field: bool = False,
 ) -> dict[str, np.ndarray]:
     """Population B: thick disk / halo — broad plane bias, older warmer stars."""
     area = width * height
@@ -348,9 +405,12 @@ def sample_halo_star_catalog(
         int(area / 195.0 * density_scale * float(np.clip(density_scale_mult, 0.05, 2.0))),
     )
     lon = rng.uniform(0.0, 2.0 * np.pi, size=n)
-    lat = rng.normal(0.0, sig, size=n)
-    lat += rng.normal(0.0, 0.06, size=n)
-    lat = np.clip(np.tanh(lat * 1.08) * _MAX_EQUIRECT_LAT, _LAT_CLIP_LO, _LAT_CLIP_HI)
+    if isotropic_field:
+        lat = _sample_isotropic_lat(rng, n, pole_margin=pole_margin, height=height)
+    else:
+        lat = rng.normal(0.0, sig, size=n)
+        lat += rng.normal(0.0, 0.06, size=n)
+        lat = _bound_lat(np.tanh(lat * 1.08) * (np.pi * 0.5), pole_margin=pole_margin)
     size_p = np.array([0.88, 0.09, 0.02, 0.01], dtype=np.float64)
     size_p /= size_p.sum()
     bv = np.clip(rng.normal(0.78, 0.26, size=n), 0.22, 1.65)
@@ -479,6 +539,13 @@ def sample_star_catalog(
     hierarchical_star_placement: bool = True,
     galactic_structure: GalacticStructure | None = None,
     population_gradient_strength: float = 0.72,
+    lon_bulge_amp: float = 0.35,
+    band_edge_power: float = 1.38,
+    pole_margin: float | None = None,
+    pole_taper_frac: float = EQUIRECT_POLE_TAPER_FRAC,
+    pole_lift: float = 0.0,
+    isotropic_field: bool = False,
+    association_fraction: float = 0.14,
 ) -> dict[str, np.ndarray]:
     area = width * height
     if layer == "foreground":
@@ -486,14 +553,15 @@ def sample_star_catalog(
             48,
             int(area / 300 * density_scale * float(np.clip(foreground_star_density_scale, 0.35, 1.5))),
         )
-        size_p = np.array([0.03, 0.12, 0.48, 0.37], dtype=np.float64)
+        # Sparse bright anchors — still tiny-heavy, but more medium/large than the bed.
+        size_p = np.array([0.72, 0.18, 0.07, 0.03], dtype=np.float64)
         size_p /= size_p.sum()
     elif layer == "mid":
         n_stars = max(
             72,
             int(area / 98 * density_scale * galactic_band_boost * band_star_density_scale * 0.55),
         )
-        size_p = np.array([0.06, 0.20, 0.44, 0.30], dtype=np.float64)
+        size_p = np.array([0.82, 0.13, 0.04, 0.01], dtype=np.float64)
         size_p /= size_p.sum()
     else:
         n_stars = max(
@@ -506,6 +574,7 @@ def sample_star_catalog(
         from starsky_gen.galactic_structure import sample_foreground_lon_lat_from_structure
 
         lon, lat = sample_foreground_lon_lat_from_structure(rng, n_stars, galactic_structure)
+        lat = _bound_lat(lat, pole_margin=pole_margin)
     elif layer == "foreground":
         lon = rng.uniform(0.0, 2.0 * np.pi, size=n_stars)
         core_lat = rng.normal(0.0, 0.38, size=n_stars)
@@ -513,7 +582,7 @@ def sample_star_catalog(
         blend = rng.random(n_stars)
         lat = np.where(blend < 0.38, core_lat, wing_lat)
         lat += rng.normal(0.0, 0.048, size=n_stars)
-        lat = np.tanh(lat * 1.22 / 1.15) * _MAX_EQUIRECT_LAT
+        lat = _bound_lat(np.tanh(lat * 1.22 / 1.15) * (np.pi * 0.5), pole_margin=pole_margin)
     elif use_poisson_placement:
         g_map = galactic_structure.stellar_density if galactic_structure is not None else None
         if hierarchical_star_placement and layer == "background" and galactic_structure is not None:
@@ -527,6 +596,7 @@ def sample_star_catalog(
                 poisson_min_sep_faint_px=poisson_min_sep_faint_px,
                 population_gradient_strength=population_gradient_strength,
             )
+            lat = _bound_lat(lat, pole_margin=pole_margin)
         elif hierarchical_star_placement and layer == "background":
             lon, lat = sample_hierarchical_poisson_field(
                 rng,
@@ -539,8 +609,15 @@ def sample_star_catalog(
                 band_lat_sigma=band_lat_sigma,
                 band_rotation_deg=band_rotation_deg,
                 band_curvature_amp=band_curvature_amp,
+                lon_bulge_amp=lon_bulge_amp,
+                band_edge_power=band_edge_power,
+                pole_margin=pole_margin,
+                pole_taper_frac=pole_taper_frac,
+                pole_lift=pole_lift,
                 poisson_min_sep_bright_px=poisson_min_sep_bright_px,
                 poisson_min_sep_faint_px=poisson_min_sep_faint_px,
+                isotropic_field=isotropic_field,
+                association_fraction=0.06 if isotropic_field else association_fraction,
             )
         else:
             lon, lat = sample_smooth_poisson_field(
@@ -554,10 +631,16 @@ def sample_star_catalog(
                 band_lat_sigma=band_lat_sigma,
                 band_rotation_deg=band_rotation_deg,
                 band_curvature_amp=band_curvature_amp,
+                lon_bulge_amp=lon_bulge_amp,
+                band_edge_power=band_edge_power,
+                pole_margin=pole_margin,
+                pole_taper_frac=pole_taper_frac,
+                pole_lift=pole_lift,
                 poisson_min_sep_bright_px=poisson_min_sep_bright_px,
                 poisson_min_sep_faint_px=poisson_min_sep_faint_px,
-                cluster_density_strength=cluster_strength * 0.45,
+                cluster_density_strength=0.0 if isotropic_field else cluster_strength * 0.45,
                 density_map=g_map,
+                isotropic_field=isotropic_field,
             )
     else:
         lon, lat = sample_galactic_disk_lon_lat(rng, n_stars)
@@ -572,10 +655,22 @@ def sample_star_catalog(
     if asym > 1e-5 and layer != "foreground":
         lon = lon + (rng.random(n_placed) - 0.5) * asym * 0.42 * np.sin(lat * 2.05 + rng.uniform(0, 6.28))
         lon = np.mod(lon, 2.0 * np.pi)
+        # Default MW clip (±0.12 rad) empties ~20px polar caps and shelves stars on
+        # the clip row. Isotropic / full-sky must keep the tiny edge margin only.
+        if isotropic_field:
+            clip_m = equirect_pole_edge_margin(height)
+        elif pole_margin is not None:
+            clip_m = float(pole_margin)
+        else:
+            clip_m = None
+        if clip_m is None:
+            lat_lo, lat_hi = _LAT_CLIP_LO, _LAT_CLIP_HI
+        else:
+            lat_lo, lat_hi, _ = _lat_clip_pair(pole_margin=clip_m)
         lat = np.clip(
             lat + (rng.random(n_placed) - 0.5) * asym * 0.14,
-            _LAT_CLIP_LO,
-            _LAT_CLIP_HI,
+            lat_lo,
+            lat_hi,
         )
 
     teff: np.ndarray | None = None
@@ -727,6 +822,7 @@ def sample_cluster_star_catalog(
     use_imf_magnitudes: bool = True,
     imf_giant_fraction: float = 0.11,
     galactic_structure: GalacticStructure | None = None,
+    full_sky_sites: bool = False,
 ) -> dict[str, np.ndarray]:
     """Associations, open clusters, and compact GCs with radial magnitude gradients."""
     area = width * height
@@ -745,7 +841,7 @@ def sample_cluster_star_catalog(
     is_gc_flags: list[bool] = []
 
     cluster_sites: list[tuple[float, float, bool]] = []
-    if galactic_structure is not None:
+    if galactic_structure is not None and not full_sky_sites:
         from starsky_gen.galactic_structure import build_population_placement_maps
         from starsky_gen.placement import pick_association_peaks, pixels_to_lon_lat
 
@@ -755,7 +851,7 @@ def sample_cluster_star_catalog(
         rows, cols = pick_association_peaks(
             peak_map, rng, n_peaks=n_clusters, min_sep_px=36.0
         )
-        for ri, ci_px in zip(rows, cols, strict=False):
+        for site_i, (ri, ci_px) in enumerate(zip(rows, cols, strict=False)):
             lon_p, lat_p = pixels_to_lon_lat(
                 np.array([ri], dtype=np.float64),
                 np.array([ci_px], dtype=np.float64),
@@ -763,7 +859,16 @@ def sample_cluster_star_catalog(
                 height,
                 rng,
             )
-            cluster_sites.append((float(lon_p[0]), float(lat_p[0]), ri < n_gc))
+            cluster_sites.append((float(lon_p[0]), float(lat_p[0]), site_i < n_gc))
+    else:
+        # Nebula / full-sky: uniform on the sphere (no midplane site bias).
+        site_margin = EQUIRECT_LAT_POLE_MARGIN_FULL_SKY if full_sky_sites else None
+        for site_i in range(n_clusters):
+            cl_lon = float(rng.uniform(0.0, 2.0 * np.pi))
+            cl_lat = float(
+                _sample_isotropic_lat(rng, 1, pole_margin=site_margin, height=height)[0]
+            )
+            cluster_sites.append((cl_lon, cl_lat, site_i < n_gc))
 
     remaining = total
     for ci in range(n_clusters):
@@ -772,6 +877,9 @@ def sample_cluster_star_catalog(
         is_gc = ci < n_gc
         if ci < len(cluster_sites):
             cl_lon, cl_lat, is_gc = cluster_sites[ci]
+        elif full_sky_sites:
+            cl_lon = float(rng.uniform(0.0, 2.0 * np.pi))
+            cl_lat = float(np.arcsin(np.clip(rng.uniform(-1.0, 1.0), -1.0, 1.0)))
         else:
             cl_lon = float(rng.uniform(0.0, 2.0 * np.pi))
             cl_lat = float(rng.normal(0.0, 0.072 if is_gc else 0.082))
@@ -935,28 +1043,56 @@ def _paint_thin_diffraction_spikes(
     radius: int,
     color_rgb: np.ndarray,
     rng: np.random.Generator,
+    *,
+    force: bool = False,
+    flux_scale: float | None = None,
 ) -> None:
-    """Rare thin 4-fold spikes (spider / refractor optics), not a second star population."""
+    """Rare thin 4-fold spikes (spider / refractor optics), not a second star population.
+
+    When ``flux_scale`` is set (HDR star flux), spoke energy tracks the core so
+    arms survive asinh display stretch; unit-RGB peaks alone wash out.
+    """
     h, w, _ = img.shape
     peak = float(np.max(color_rgb))
     if peak < 0.22:
         return
+    fs = float(flux_scale) if flux_scale is not None and flux_scale > 0.0 else None
     if radius >= 5:
-        if rng.random() >= 0.52:
+        if not force and rng.random() >= 0.52:
             return
-        L = int(rng.integers(14, 26))
-        amp0 = peak * float(rng.uniform(0.022, 0.058))
+        L = int(rng.integers(16 if force else 14, 32 if force else 26))
+        if fs is not None:
+            amp0 = fs * float(rng.uniform(0.006 if force else 0.0025, 0.014 if force else 0.006))
+        else:
+            amp0 = peak * float(rng.uniform(0.055 if force else 0.022, 0.12 if force else 0.058))
     elif radius >= 4:
-        if rng.random() >= 0.14:
+        if not force and rng.random() >= 0.14:
             return
-        L = int(rng.integers(9, 18))
-        amp0 = peak * float(rng.uniform(0.012, 0.038))
+        L = int(rng.integers(10 if force else 9, 20 if force else 18))
+        if fs is not None:
+            amp0 = fs * float(rng.uniform(0.004 if force else 0.0018, 0.010 if force else 0.0045))
+        else:
+            amp0 = peak * float(rng.uniform(0.035 if force else 0.012, 0.08 if force else 0.038))
     else:
-        if peak < 0.38 or rng.random() >= 0.065:
+        if not force and (peak < 0.38 or rng.random() >= 0.065):
             return
         L = int(rng.integers(5, 11))
-        amp0 = peak * float(rng.uniform(0.007, 0.022))
+        if fs is not None:
+            amp0 = fs * float(rng.uniform(0.002, 0.006))
+        else:
+            amp0 = peak * float(rng.uniform(0.018 if force else 0.007, 0.045 if force else 0.022))
 
+    # Unit spectral tint for chroma; energy lives in amp0.
+    tint = color_rgb.astype(np.float64)
+    tpeak = float(np.max(tint)) + 1e-8
+    tint = tint / tpeak
+
+    # Keep spokes inside the frame — truncated arms on y=0/h-1 read as border lines.
+    edge_pad = 2
+    edge_room = int(min(max(y - edge_pad, 0), max(h - 1 - edge_pad - y, 0)))
+    L = int(min(L, max(2, edge_room)))
+    if L < 2:
+        return
     ang = float(rng.uniform(0.0, 0.5 * np.pi))
     for k in range(4):
         th = ang + k * (0.5 * np.pi)
@@ -965,12 +1101,12 @@ def _paint_thin_diffraction_spikes(
             ox = int(round(t * cth))
             oy = int(round(t * sth))
             py, px = y + oy, (x + ox) % w
-            if py < 0 or py >= h:
+            if py < edge_pad or py >= h - edge_pad:
                 continue
-            fall = 1.0 / ((0.55 + float(t)) ** 1.15)
+            fall = 1.0 / ((0.45 + float(t)) ** 1.05)
             tip = float(t) / float(max(L, 1))
             chrom = np.array([0.96 - 0.05 * tip, 0.98 - 0.02 * tip, 1.0 + 0.10 * tip], dtype=np.float64)
-            img[py, px] += color_rgb * (amp0 * fall) * chrom
+            img[py, px] += tint * (amp0 * fall) * chrom
 
 
 def paint_star(

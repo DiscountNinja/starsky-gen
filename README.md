@@ -17,7 +17,7 @@ Low resolution sample:
 - Nebula modes: `distant`, `full`, `galaxy_streak`.
 - Output projections: `equirectangular`, `cubemap`, or `both` (seam-aware / wrap-safe).
 - Batch generation with per-render and total progress bars.
-- Optional `--look-target documentary` for the parked photo/long-exposure grade.
+- Optional `--look-target documentary` / `long_exposure` for parked photo or stacked-trail grades.
 - Optional JPEG artifact pass for subtle compression character.
 - Default background avoids pure black, using a noisy bluish-gray field with galactic-disk weighting.
 
@@ -81,15 +81,18 @@ Main output and run controls:
 
 Feature toggles:
 
-- `--stars/--no-stars`
-- `--depth/--no-depth`
+- `--stars/--no-stars` — background catalogs (band/mid/cosmic/halo); heroes are separate
+- `--noheroes` — disable hero stars only
+- `--depth/--no-depth` — dim catalog stars toward poles (not camera DOF)
 - `--nebula/--no-nebula`
-- `--galaxy-view/--no-galaxy-view`
+- `--galaxy-view/--no-galaxy-view` — MW band under `--mode normal`
 - `--background-gradient/--no-background-gradient`
 - `--black-background/--no-black-background`
 - `--jpeg-artifact-pass/--no-jpeg-artifact-pass`
-- `--look-target` (`cinematic|documentary`, default `cinematic`)
-- `--long-exposure-look/--flat-exposure` (default flat / wrap-safe; documentary enables long-exposure)
+- `--look-target` (`cinematic|documentary|long_exposure`, default `cinematic`)
+- `--long-exposure-look/--flat-exposure` (advanced cinematic override; prefer `--look-target long_exposure`)
+- `--isolate-layer` (`none|background_stars|heroes|nebula_gas`)
+- `--background-density` (`0.0..2.0`, blank = look default)
 
 Background texture:
 
@@ -99,15 +102,16 @@ Nebula controls:
 
 - `--nebula-mode` (`distant|full|galaxy_streak`, default `galaxy_streak`)
 - `--nebula-style` (`subtle|balanced|dramatic`, default `balanced`)
-- `--cloud-continuity` (`0.6..1.6`, default `1.22`)
-- `--dust-coverage` (`0.5..1.6`, default `0.98`)
-- `--dust-strength` (`0.5..1.8`, default `1.14`)
+- `--cloud-continuity` (`0.0..1.6`, default `1.22`; `0` = off)
+- `--dust-coverage` (`0.0..1.6`, default `0.98`; `0` = none)
+- `--dust-strength` (`0.0..1.8`, default `1.14`; `0` = none)
 - `--nebula-debug-pass` (`normal|occluder_only|continuum_only`, default `normal`; galaxy_streak also supports noise-layer diagnostics such as `layer_filaments`, `layer_dust_alpha`, `mask_only`, `warp_vectors`)
 
 Look / galaxy tuning:
 
 - `--look-target cinematic` — AAA wrap-safe vista (filmic, bloom up, grain down; default)
-- `--look-target documentary` — parked photo/long-exposure stack (asinh, grain, sensor ISP)
+- `--look-target documentary` — parked photo grade (asinh, grain, sensor ISP; no trails)
+- `--look-target long_exposure` — documentary + stacked trails look
 - `--photoreal-stars` / `--classic-stars` (default magnitude+Moffat PSF stars)
 - `--mag-bright`, `--mag-faint`, `--band-star-density`
 - `--mag-exponent` (magnitude log slope)

@@ -1,0 +1,24 @@
+---
+description: Surface security, scope, optimization, and library recommendations when relevant
+alwaysApply: true
+---
+
+# Surface Helpful Recommendations
+
+When working on this project, proactively include brief, actionable recommendations when they clearly help the overall goal: **photo-realistic, reproducible starfield/skybox generation for games and assets**.
+
+Do not pad every reply. Only surface recommendations that are relevant to the current task or an obvious adjacent risk/opportunity. Keep each recommendation to one or two sentences, and prefer concrete next steps over vague advice.
+
+## Include when relevant
+
+- **Security**: dependency/supply-chain risks, unsafe I/O or path handling, untrusted input in CLI/config, secrets in logs/debug dumps, or anything that could affect users consuming generated assets in pipelines.
+- **Scope**: features or refactors that drift from the skybox/game-asset mission; suggest narrowing, deferring, or splitting work when it reduces risk or keeps the renderer focused.
+- **Performance / quality optimizations**: NumPy/vectorization, memory for large equirect/cubemap renders, seeding/reproducibility, parallel batch generation, tone-map/compositing hotspots, or debug-layer cost.
+- **Libraries / tools**: mature libraries that improve rendering fidelity, color science, noise, projections, image I/O, testing, or CLI ergonomics — only when they beat the current approach on fit, maintenance, or clarity for this codebase.
+
+## How to present them
+
+- Put recommendations in a short closing note or inline where they affect a decision; do not bury the primary answer.
+- Tie each recommendation to a concrete benefit (security, fidelity, speed, maintainability, or scope control).
+- If recommending a library, name why it fits starsky-gen (e.g. HDR, ACES, spherical projections) rather than listing popular packages generically.
+- If a recommendation would change architecture or trade-offs, consider switching to Plan mode first.

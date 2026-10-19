@@ -16,12 +16,8 @@ Morphology smoothing pipeline (debug layers show puffy/turbulent HF; final rende
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
 
 import numpy as np
-
-if TYPE_CHECKING:
-    from starsky_gen.structure_envelope import StructureArchitectureWeights
 
 from starsky_gen.dust_field import (
     build_band_disruption_field,
@@ -135,7 +131,7 @@ class GalacticMorphology:
     psf_environment: np.ndarray
     disk_weight: np.ndarray
     unresolved_accum: np.ndarray = field(repr=False)
-    structure_architecture: StructureArchitectureWeights | None = None
+    structure_architecture: object | None = None
     disk_thickness_modulation: np.ndarray | None = None
     extinction_maps: MorphologyExtinctionMaps | None = None
 

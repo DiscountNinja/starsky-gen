@@ -6,9 +6,22 @@
 starsky-gen
 ```
 
-Defaults: `--look-target cinematic`, `--flat-exposure`, `--nebula-mode galaxy_streak`, `--output-format png`, `--quality 100`, `--projection-mode equirectangular`.
+Defaults: `--mode normal`, `--look-target cinematic`, `--nebula-mode galaxy_streak`, `--output-format png`, `--quality 100`, `--projection-mode equirectangular`.
 
 Background is a noisy bluish-gray field that darkens away from the galactic disk unless you pass `--black-background`. Cinematic look keeps grain near zero and bloom/tone elevated for wrap-safe game vistas.
+
+### Scene mode (`--mode`)
+
+- `normal` — Milky Way band skybox (galactic midplane + `nebula-mode` distant/full/galaxy_streak)
+- `nebula` — broad cloud-complex vista with **no galactic band**
+
+Under `--mode nebula`, guided skips the Galaxy view prompt (band is already off). Grade/photoreal still use an internal `galaxy_view` path. Layer toggles (`--no-stars`, `--no-nebula`, `--noheroes`, `--background-density 0`) are honored. Use `--nebula-style dramatic` to densify dust and push multi-hue emission on the cloud-complex path.
+
+```bash
+starsky-gen --no-guided --mode normal --seed 1
+starsky-gen --no-guided --mode nebula --seed 1
+starsky-gen generate --mode nebula --nebula-mode full --nebula-style dramatic --seed 42
+```
 
 ### Guided / discovery mode (default when no flags)
 
@@ -24,10 +37,11 @@ Walks generate options interactively when you pass **no** CLI flags (newbie-frie
 
 1. **Size preset** — 2K (2048×1024), 4K (4096×2048), 8K (8192×4096), or custom `--width` / `--height`
 2. **Output type** — equirectangular, cubemap, or both (`--projection-mode`)
-3. **Core options** — each prompt shows the matching CLI flag and a short help line
-4. **Advanced?** `[y/N]` — optional debug / morphology / profile knobs
-5. Prints a short **summary** plus an **equivalent command** you can reuse without `--guided`
-6. **Start render?** `[Y/n]` — choose `n` to exit after discovery (no images written)
+3. **Scene mode** — `normal` (Milky Way) or `nebula` (broad cloud complex) via `--mode`
+4. **Core options** — each prompt shows the matching CLI flag and a short help line
+5. **Advanced?** `[y/N]` — optional debug / morphology / profile knobs
+6. Prints a short **summary** plus an **equivalent command** you can reuse without `--guided`
+7. **Start render?** `[Y/n]` — choose `n` to exit after discovery (no images written)
 
 Type `q` at any prompt to cancel. You can still pass flags with `--guided`; those values become the defaults shown in prompts.
 
@@ -36,10 +50,10 @@ Type `q` at any prompt to cancel. You can still pass flags with `--guided`; thos
 Before generate runs, starsky-gen may ask for copyright / distribution status to embed in PNG (and JPEG Copyright) metadata:
 
 1. **C**opyrighted / **O**pen / **U**nknown (Enter = Unknown)
-2. If **O** or **U** — no further prompts; both Copyright and License metadata use `open` / `unknown`
+2. If **O** or **U** — no further prompts in that session; both Copyright and License metadata use `open` / `unknown`
 3. If **C** — asks **distribution rights / license** (free text, e.g. `All Rights Reserved`, `CC BY 4.0`), then an **optional copyright holder** name (Enter → `© YEAR` only)
 
-Reminder prompts for copyrighted/open appear every 20 runs. The local YAML `.license` file stores status, optional holder, year, `distribution_rights`, run count, and last seed / look target; it is gitignored.
+Once **open** or **copyrighted** is saved, generate does not ask again. **Unknown** (or Enter) re-asks next generate — a light legal nudge, not a recurring interrupt. The local YAML `.license` file stores status, optional holder, year, `distribution_rights`, run count, and last seed / look target; it is gitignored.
 
 Equivalent module invocation:
 
@@ -76,42 +90,62 @@ Nebula modes:
 
 ## Look target and display tuning
 
-Primary product look is **cinematic** (AAA wrap-safe skybox). Documentary/photo grading is opt-in:
+Primary product look is **cinematic** (AAA wrap-safe skybox). Photo and long-exposure looks are opt-in via `--look-target`:
 
 ```bash
-starsky-gen --look-target cinematic   # default: filmic, bloom up, grain down, flat exposure
-starsky-gen --look-target documentary # parked photo/long-exposure stack
+starsky-gen --look-target cinematic      # wrap-safe skybox (default)
+starsky-gen --look-target documentary    # parked photo grade (no star trails)
+starsky-gen --look-target long_exposure  # documentary + stacked trails look
 ```
+
+`--long-exposure-look` / `--flat-exposure` remain as an advanced override for cinematic only; prefer `--look-target long_exposure` for the full trail stack.
 
 Galaxy renders still use magnitude-based PSF stars by default (`--photoreal-stars`) for sharp, realistic color — that is not the same as a documentary camera grade.
 
-### Look recipes (cinematic vs documentary)
+### Look recipes
 
-`finalize_render_config()` applies a look recipe, then the Milky Way recognition preset. Shared morphology/extinction/PSF stay available under both targets; the sandwich *composite* path differs:
+`finalize_render_config()` applies a look recipe, then the Milky Way recognition preset (normal mode). Shared morphology/extinction/PSF stay available; the sandwich *composite* path differs for cinematic vs documentary/long_exposure.
 
-| Knob | Cinematic | Documentary |
-|------|-----------|-------------|
+| Knob | Cinematic | Documentary / long_exposure |
+|------|-----------|------------------------------|
 | `lane_star_dropout_boost` | moderate (~0.55) | **0** |
 | `post_star_lane_protect_strength` | soft (~0.48; midplane glow OK) | **0** |
 | `dark_rift_strength` | on (~0.78+) | **0** |
 | `star_layer_bloom_strength` / `star_psf_bloom_scale` | stronger hero bloom | **0** / lower |
 | `structure_type_competition` | competitive types | **0** (soft blend) |
-| Tone / grain / bloom | filmic, bloom up, grain down, shadow lift | asinh + long-exposure / ISP stack |
+| Tone / grain / bloom | filmic, bloom up, grain down | asinh + ISP stack |
+| Star trails | off | off (documentary) / on (long_exposure) |
 
-Cinematic prioritizes **volumetric glow + color hierarchy** (warm cores, cooler shells, void windows, soft BandPlan shoulders) over a strict dark-lane mid&lt;shell sandwich. BandPlan still drives protect/rifts; `--debug-layers` exports `band_plan_lane.png`, `band_plan_rift.png`, `band_plan_protect.png`, and `band_plan_shell.png`. Documentary zeros sandwich leftovers. Advanced `FeatureConfig` fields remain for manual override.
+Cinematic prioritizes **volumetric glow + color hierarchy**. BandPlan still drives protect/rifts; `--debug-layers` exports band-plan PNGs. Documentary/long_exposure zero sandwich leftovers.
+
+### Layer toggles and isolate
+
+- `--stars` / `--no-stars` — **background** catalogs (band/mid/cosmic/halo), not heroes
+- `--noheroes` — disable hero stars only (spikes/ghosts); heroes can render with `--no-stars`
+- `--nebula` / `--no-nebula` — gas; when off, guided skips nebula-mode/style/dust prompts
+- `--background-density` — off-plane/cosmic/halo **star** density `[0–2]` (0 = none); blank = look default
+- `--cloud-continuity` `[0–1.6]`, `--dust-coverage` `[0–1.6]`, `--dust-strength` `[0–1.8]` (0 = off/none)
+- `--depth` / `--no-depth` — dim catalog stars toward poles (not camera DOF)
+- `--render-profile` — `physical` = linear only; `physical_grade` = +grade; `full` = +display finish/grain
+- `--isolate-layer` — final plate on black: `none` | `background_stars` | `heroes` | `nebula_gas`
+
+```bash
+# Black nebula + heroes only
+starsky-gen --no-guided --mode nebula --black-background --no-stars --nebula \
+  --seed 42 --isolate-layer none
+# Heroes plate only
+starsky-gen --no-guided --mode nebula --no-stars --isolate-layer heroes --seed 42
+```
 
 Key knobs:
 
-- `--look-target` (`cinematic|documentary`)
-- `--noheroes` — disable procedural hero stars (spikes / lens ghosts) while iterating
-- `--long-exposure-look` / `--flat-exposure` (default flat; documentary enables long-exposure)
+- `--look-target` (`cinematic|documentary|long_exposure`)
+- `--noheroes` — disable hero stars while keeping background stars
 - `--mag-bright`, `--mag-faint`, `--band-star-density`
 - `--asinh-gain`, `--asinh-q`, `--galaxy-tone-curve` (`reinhard|asinh|filmic|aces|acescct`; default `filmic`)
 - `--disk-star-density-dropout` — thin resolved stars in the bright plane
 - `--star-band-chroma-desat`, `--star-band-brightness-scale` — plane star look
-- `--render-profile physical` — linear physical composite only (no display finish)
-- `--render-profile physical_grade` — physical + unified linear grade, no final display polish
-- `--render-profile full` — full pipeline (default)
+- `--render-profile physical|physical_grade|full`
 
 ## Debug / morphology layers
 

@@ -1,12 +1,15 @@
-"""Procedural hero stars: select a few bright band anchors with lens FX."""
+"""Procedural hero stars: select a few bright anchors with lens FX."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import numpy as np
 
 from starsky_gen.projections import sph_to_equirect_xy_float
+
+HeroPlacement = Literal["rim", "full_sky"]
 
 
 @dataclass(frozen=True)
@@ -29,11 +32,14 @@ def select_hero_indices(
     min_sep_frac: float = 0.10,
     off_plane_slots: int = 2,
     rng: np.random.Generator | None = None,
+    placement: HeroPlacement = "rim",
+    structure_weight: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Greedy pick ``count`` heroes on band edges / just outside with wrap-aware x sep.
+    """Greedy pick ``count`` heroes with wrap-aware x separation.
 
-    Prefer rim score (soft plane × low razor midplane) over dense midplane core.
-    Up to ``off_plane_slots`` may sit slightly further off-plane for depth.
+    ``placement="rim"`` (normal MW): prefer band edges / just outside midplane.
+    ``placement="full_sky"`` (nebula scene): structure-weighted full sphere, no |lat| gate.
+    Optional ``structure_weight`` anchors 1–2 heroes near bright emission cores.
     """
     n = int(np.asarray(catalog["lon"]).shape[0])
     k = int(max(0, min(count, n)))
@@ -62,22 +68,16 @@ def select_hero_indices(
         elif d2.ndim == 1 and d2.shape[0] == h:
             dw = d2[yi]
 
-    lat_abs = np.abs(lat)
-    # Soft plane envelope vs razor midplane — rim peaks at band edges / just outside.
-    soft_w = np.exp(-((lat_abs / 0.30) ** 2))
-    razor_w = np.exp(-((lat_abs / 0.085) ** 2))
-    rim_w = soft_w * (1.0 - 0.88 * razor_w)
-    # Slight boost just outside the dense core (|lat| ~ 0.12–0.22).
-    edge_bump = np.exp(-(((lat_abs - 0.16) / 0.10) ** 2))
-    rim_w = np.clip(rim_w + 0.35 * edge_bump * soft_w, 0.0, 1.0)
-    outer_w = np.exp(-((lat_abs / 0.42) ** 2)) * (1.0 - 0.70 * soft_w)
+    sw = np.ones(n, dtype=np.float64)
+    if structure_weight is not None:
+        s2 = np.clip(np.asarray(structure_weight, dtype=np.float64), 0.0, 1.0)
+        if s2.shape == (h, w):
+            sw = s2[yi, xi]
+        elif s2.ndim == 1 and s2.shape[0] == h:
+            sw = s2[yi]
 
     host = 0.30 + 0.70 * dw
-    score_rim = bright * host * (0.20 + 0.80 * rim_w)
-    score_outer = bright * host * (0.25 + 0.75 * outer_w)
-
-    order_rim = np.argsort(-score_rim)
-    order_outer = np.argsort(-score_outer)
+    lat_abs = np.abs(lat)
     min_sep = float(np.clip(min_sep_frac, 0.04, 0.25)) * float(w)
     chosen: list[int] = []
     chosen_x: list[float] = []
@@ -93,28 +93,59 @@ def select_hero_indices(
         chosen_x.append(x)
         return True
 
-    n_off = int(np.clip(off_plane_slots, 0, k))
-    n_rim = k - n_off
-    for idx in order_rim:
-        if len(chosen) >= n_rim:
-            break
-        _try_add(int(idx))
-    for idx in order_outer:
-        if len(chosen) >= k:
-            break
-        if int(idx) in chosen:
-            continue
-        _try_add(int(idx))
-    # Fill remaining from rim order if outer pool was sparse.
-    for idx in order_rim:
-        if len(chosen) >= k:
-            break
-        if int(idx) in chosen:
-            continue
-        _try_add(int(idx))
+    if placement == "full_sky":
+        score = bright * (0.35 + 0.65 * sw) * (0.55 + 0.45 * host)
+        order = np.argsort(-score)
+        for idx in order:
+            if len(chosen) >= k:
+                break
+            _try_add(int(idx))
+    else:
+        # Soft plane envelope vs razor midplane — rim peaks at band edges / just outside.
+        soft_w = np.exp(-((lat_abs / 0.30) ** 2))
+        razor_w = np.exp(-((lat_abs / 0.085) ** 2))
+        rim_w = soft_w * (1.0 - 0.88 * razor_w)
+        edge_bump = np.exp(-(((lat_abs - 0.16) / 0.10) ** 2))
+        rim_w = np.clip(rim_w + 0.35 * edge_bump * soft_w, 0.0, 1.0)
+        outer_w = np.exp(-((lat_abs / 0.42) ** 2)) * (1.0 - 0.70 * soft_w)
+
+        score_rim = bright * host * (0.20 + 0.80 * rim_w)
+        score_outer = bright * host * (0.25 + 0.75 * outer_w)
+        # Mild structure-core anchors (emission cores) — keep rim primary.
+        score_struct = bright * (0.40 + 0.60 * sw) * (0.35 + 0.65 * soft_w)
+
+        order_rim = np.argsort(-score_rim)
+        order_outer = np.argsort(-score_outer)
+        order_struct = np.argsort(-score_struct)
+
+        n_struct = min(2, max(0, k // 3)) if structure_weight is not None else 0
+        n_off = int(np.clip(off_plane_slots, 0, k))
+        n_rim = max(0, k - n_off - n_struct)
+
+        for idx in order_rim:
+            if len(chosen) >= n_rim:
+                break
+            _try_add(int(idx))
+        for idx in order_struct:
+            if len(chosen) >= n_rim + n_struct:
+                break
+            if int(idx) in chosen:
+                continue
+            _try_add(int(idx))
+        for idx in order_outer:
+            if len(chosen) >= k:
+                break
+            if int(idx) in chosen:
+                continue
+            _try_add(int(idx))
+        for idx in order_rim:
+            if len(chosen) >= k:
+                break
+            if int(idx) in chosen:
+                continue
+            _try_add(int(idx))
 
     if rng is not None and len(chosen) > 1:
-        # Mild shuffle of selection order for uneven visual rhythm (positions fixed).
         arr = np.asarray(chosen, dtype=np.int64)
         rng.shuffle(arr)
         return arr

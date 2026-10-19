@@ -59,10 +59,47 @@ def test_open_mirrors_distribution_rights(tmp_path: Path) -> None:
     assert loaded.normalized_distribution() == "open"
     assert should_prompt(loaded) is False
 
-    loaded.run_count = 19
+    # Once set, never re-prompt — even after many runs.
+    loaded.run_count = 10_000
+    loaded.last_prompt_at = 0
     assert should_prompt(loaded) is False
-    loaded.run_count = 20
-    assert should_prompt(loaded) is True
+
+
+def test_open_without_last_prompt_at_does_not_reprompt_every_run(tmp_path: Path) -> None:
+    """Legacy / partial .license with open but no last_prompt_at must not nag every generate."""
+    path = tmp_path / ".license"
+    path.write_text(
+        "copyright_status: open\ncopyright_year: 2026\nrun_count: 4\n",
+        encoding="utf-8",
+    )
+    loaded = load_license(path)
+    assert loaded.copyright_status == "open"
+    assert loaded.last_prompt_at == 4
+    assert should_prompt(loaded) is False
+
+
+def test_should_prompt_only_when_unknown() -> None:
+    assert should_prompt(LicenseState(copyright_status="unknown")) is True
+    assert should_prompt(LicenseState(copyright_status="open", run_count=99, last_prompt_at=0)) is False
+    assert should_prompt(
+        LicenseState(copyright_status="copyrighted", run_count=99, last_prompt_at=0)
+    ) is False
+    assert should_prompt(LicenseState(copyright_status="open", last_prompt_at=None)) is False
+
+
+def test_license_path_finds_repo_root_from_subdir(tmp_path: Path, monkeypatch) -> None:
+    from starsky_gen.licensing import license_path
+
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+    nested = tmp_path / "output" / "run"
+    nested.mkdir(parents=True)
+    monkeypatch.chdir(nested)
+    assert license_path() == tmp_path / ".license"
+
+    # Existing file in a parent wins even without walking to pyproject.
+    mid = tmp_path / "output" / ".license"
+    mid.write_text("copyright_status: open\n", encoding="utf-8")
+    assert license_path() == mid
 
 
 def test_copyrighted_license_then_holder() -> None:

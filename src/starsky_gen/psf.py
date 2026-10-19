@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Literal, TypedDict, cast
+from typing import Literal, TypedDict
 
 import numpy as np
 
@@ -232,21 +232,22 @@ def psf_halo_tiers(
     mag: float,
     tuning: PsfTuning | None = None,
 ) -> tuple[float, float, float, bool]:
-    """Halo tiers: tight inner exp (0.5–1%), noise-masked outer wing (0.2–0.6%), ultra wide frac."""
+    """Halo tiers: tight inner exp, noise-masked outer wing, ultra wide frac, bloom gate."""
     t = PsfTuning() if tuning is None else tuning
-    if flux < t.halo_flux_floor * 0.85:
+    if flux < t.halo_flux_floor * 0.35:
         return 0.0, 0.0, 0.0, False
     bright_u = 1.0 - _mag_span_fraction(mag, t.mag_bright, t.mag_faint)
     logf = float(np.log10(max(flux, 1.0)))
-    inner_rel = float(0.005 + 0.005 * bright_u)
-    inner_rel = min(inner_rel, 0.010)
-    outer_rel = float(0.002 + 0.004 * np.clip((logf - 1.05) / 1.25, 0.0, 1.0))
-    outer_rel = min(outer_rel, 0.006)
+    # Stronger photographic soft falloff on brighter stars (was ~0.5–1% / 0.2–0.6%).
+    inner_rel = float(0.010 + 0.028 * bright_u + 0.012 * np.clip((logf - 0.6) / 1.4, 0.0, 1.0))
+    inner_rel = min(inner_rel, 0.048)
+    outer_rel = float(0.006 + 0.018 * np.clip((logf - 0.55) / 1.35, 0.0, 1.0) + 0.010 * bright_u)
+    outer_rel = min(outer_rel, 0.032)
     wide_frac = 0.0
-    if flux >= t.ultra_halo_flux_cut:
-        wide_frac = float(0.006 + 0.008 * np.clip((logf - 2.50) / 0.80, 0.0, 1.0))
-        wide_frac = min(wide_frac, 0.014)
-    allow_bloom = flux >= t.ultra_halo_flux_cut * 1.4 and mag < t.m_bloom_cut
+    if flux >= t.ultra_halo_flux_cut * 0.55:
+        wide_frac = float(0.010 + 0.022 * np.clip((logf - 1.60) / 1.10, 0.0, 1.0))
+        wide_frac = min(wide_frac, 0.038)
+    allow_bloom = flux >= t.ultra_halo_flux_cut * 0.55 and mag < t.m_bloom_cut + 0.6
     return inner_rel, outer_rel, wide_frac, allow_bloom
 
 
@@ -415,21 +416,32 @@ def stamp_psf_patch(
     ix0 = float(xi - kw // 2) + float(subpixel_dx)
     yi_row = iy0 + np.arange(kh, dtype=np.float64)
     xi_col = ix0 + np.arange(kw, dtype=np.float64)
-    # Mask on float sample coords (same as former meshgrid path), then round.
-    vy = (yi_row >= 0.0) & (yi_row < float(h))
+    # Skip (do not clamp) out-of-range Y. Soft-fade the last few rows so truncated
+    # glow does not form a bright rim — without emptying a large polar band.
+    yy_round = np.round(yi_row).astype(np.int64)
+    vy = (yi_row >= 0.0) & (yi_row < float(h)) & (yy_round >= 0) & (yy_round < h)
     if not bool(np.any(vy)):
         return
-    yy_i = np.clip(np.round(yi_row).astype(np.int64), 0, h - 1)
+    yy_i = yy_round
+    # Mute only the absolute border pixel; full strength by ~3px inward.
+    fade = 3.0 if h > 16 else 1.5
+    dist = np.minimum(yy_i.astype(np.float64), float(h - 1) - yy_i.astype(np.float64))
+    edge_w = np.clip(dist / fade, 0.0, 1.0)
+    edge_w = edge_w * edge_w * (3.0 - 2.0 * edge_w)  # smoothstep
     xx_i = np.round(xi_col).astype(np.int64)
     if periodic_x:
         xx_i = np.mod(xx_i, wd)
-        canvas[yy_i[vy, None], xx_i[None, :]] += kern[vy, :, None] * ampl
+        w_y = edge_w[vy][:, None, None]
+        canvas[yy_i[vy, None], xx_i[None, :]] += kern[vy, :, None] * ampl * w_y
     else:
         vx = (xi_col >= 0.0) & (xi_col < float(wd))
         if not bool(np.any(vx)):
             return
         xx_i = np.clip(xx_i, 0, wd - 1)
-        canvas[yy_i[vy, None], xx_i[None, :][:, vx]] += kern[np.ix_(vy, vx)][..., None] * ampl
+        w_y = edge_w[vy][:, None, None]
+        canvas[yy_i[vy, None], xx_i[None, :][:, vx]] += (
+            kern[np.ix_(vy, vx)][..., None] * ampl * w_y
+        )
 
 
 def _split_psf_flux(
@@ -702,15 +714,13 @@ def stamp_star_psf(
     )
     if field_angle_rad is not None:
         elong = 1.0 + 0.06 * min(abs(field_angle_rad), 1.2)
-        stretched = dict(params)
-        stretched["sigma_x"] = float(params["sigma_x"]) * elong
-        stretched["sigma_y"] = float(params["sigma_y"]) / elong
-        params = cast(MoffatParams, stretched)
+        params = dict(params)
+        params["sigma_x"] = float(params["sigma_x"]) * elong
+        params["sigma_y"] = float(params["sigma_y"]) / elong
     csx, csy = chromatic_sigma_scales(bv=bv, teff_k=teff_k, tuning=t)
-    scaled = dict(params)
-    scaled["sigma_x"] = float(params["sigma_x"]) * csx * float(v.sigma_scale)
-    scaled["sigma_y"] = float(params["sigma_y"]) * csy * float(v.sigma_scale)
-    params = cast(MoffatParams, scaled)
+    params = dict(params)
+    params["sigma_x"] = float(params["sigma_x"]) * csx * float(v.sigma_scale)
+    params["sigma_y"] = float(params["sigma_y"]) * csy * float(v.sigma_scale)
     halo_sigma *= float(v.halo_scale)
     spec = spectral_rgb.astype(np.float64)
     cr, cg, cb = v.chroma_rgb
@@ -855,7 +865,7 @@ def stamp_star_psf(
         outer_rel = 0.0
         wide_frac = 0.0
         allow_bloom = False
-    elif style == StarPsfStyle.SATURATED and flux >= t.halo_flux_floor * 0.45:
+    elif style in (StarPsfStyle.SATURATED, StarPsfStyle.SOFT_SEEING) and flux >= t.halo_flux_floor * 0.45:
         allow_bloom = True
     if psf_tier == PsfTier.FOREGROUND and allow_bloom:
         allow_bloom = True

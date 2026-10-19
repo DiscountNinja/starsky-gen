@@ -10,6 +10,7 @@ from starsky_gen.config import (
     RenderConfig,
     _CINEMATIC_LOOK_UPDATE,
     _DOCUMENTARY_LOOK_UPDATE,
+    _LONG_EXPOSURE_LOOK_UPDATE,
     apply_look_target_preset,
     finalize_render_config,
 )
@@ -94,9 +95,26 @@ def test_documentary_preset_restores_photo_stack() -> None:
     out = apply_look_target_preset(cfg).features
     for key, expected in _DOCUMENTARY_LOOK_UPDATE.items():
         assert getattr(out, key) == expected, key
-    assert out.long_exposure_look is True
+    assert out.long_exposure_look is False
+    assert out.long_exposure_star_trails is False
     assert out.film_grain_strength == 0.04
     assert out.galaxy_tone_curve == "asinh"
+
+
+def test_long_exposure_look_target_is_tracked_deep_field() -> None:
+    cfg = RenderConfig(features=FeatureConfig(look_target=LookTarget.long_exposure))
+    out = apply_look_target_preset(cfg).features
+    for key, expected in _LONG_EXPOSURE_LOOK_UPDATE.items():
+        assert getattr(out, key) == expected, key
+    # Point sources: no trails / stacked sky theater, minimal bloom, denser faint field.
+    assert out.long_exposure_look is False
+    assert out.long_exposure_star_trails is False
+    assert out.star_layer_bloom_strength == 0.0
+    assert out.spike_max_count == 0
+    assert out.shadow_lift == 0.0
+    assert out.cosmic_star_density_scale >= 1.4
+    assert out.background_star_density_scale >= 0.85
+    assert out.mag_faint_lim >= 21.0
 
 
 def test_documentary_finalize_zeros_sandwich_knobs() -> None:

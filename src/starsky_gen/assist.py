@@ -112,13 +112,14 @@ def mutate_render_config(
         1.8,
     )
     look = cfg.features.look_target
-    # Cinematic is the baseline; rarely opt into parked documentary look.
+    # Cycle look targets occasionally (cinematic → documentary → long_exposure).
     if rng.random() < (0.04 * decay + 0.01):
-        look = LookTarget.documentary if look == LookTarget.cinematic else LookTarget.cinematic
+        cycle = (LookTarget.cinematic, LookTarget.documentary, LookTarget.long_exposure)
+        look = cycle[(cycle.index(look) + 1) % len(cycle)] if look in cycle else LookTarget.cinematic
 
-    long_exposure = cfg.features.long_exposure_look
-    if look == LookTarget.documentary and rng.random() < (0.08 * decay):
-        long_exposure = not long_exposure
+    long_exposure = look == LookTarget.long_exposure
+    if look == LookTarget.cinematic and rng.random() < (0.05 * decay):
+        long_exposure = not cfg.features.long_exposure_look
 
     cfg.nebula_tuning = NebulaTuningConfig(
         style=style,

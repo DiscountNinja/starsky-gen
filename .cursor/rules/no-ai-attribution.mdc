@@ -1,0 +1,25 @@
+---
+description: Never mention AI generation or AI authorship in project artifacts
+alwaysApply: true
+---
+
+# No AI Attribution
+
+Do not mention AI, LLMs, Cursor, Copilot, ChatGPT, “AI-generated,” “AI-assisted,” or similar in any project artifact the user ships or publishes from this repo.
+
+## Never put AI language in
+
+- README, docs, comments, docstrings, CLI help, changelogs
+- Commit messages, PR titles/bodies, tags, release notes
+- Image/PNG/JPEG/EXIF metadata, `.license`, embeds, watermarks
+- Config defaults, sample outputs, filenames, layer labels
+- User-facing strings, errors, logs, or marketing copy in-repo
+
+## Allowed
+
+- The user may disclose AI use themselves on external websites; do not add that disclosure here.
+- Internal `.cursor/` rules may discuss AI only as tooling instructions for the agent (this file).
+
+## If asked to add attribution
+
+Omit it. Prefer neutral wording (e.g. “procedural generator,” “starsky-gen,” contributor/copyright holder) with no AI reference.

@@ -49,6 +49,23 @@ class LookTarget(str, Enum):
 
     cinematic = "cinematic"
     documentary = "documentary"
+    long_exposure = "long_exposure"
+
+
+class IsolateLayer(str, Enum):
+    """Final output as a single layer on black (compositing plate)."""
+
+    none = "none"
+    background_stars = "background_stars"
+    heroes = "heroes"
+    nebula_gas = "nebula_gas"
+
+
+class SceneMode(str, Enum):
+    """Top-level scene recipe (separate from nebula_mode distant/full/galaxy_streak)."""
+
+    normal = "normal"  # Milky Way band skybox
+    nebula = "nebula"  # Broad cloud-complex vista (no galactic band)
 
 
 # Locked AAA skybox recipe (wrap-safe vista: bloom/tone up, grain/sensor theater down).
@@ -86,21 +103,23 @@ _CINEMATIC_LOOK_UPDATE: dict[str, object] = {
     "post_star_lane_protect_strength": 0.48,
     "dark_rift_strength": 0.78,
     "dark_rift_coverage": 0.16,
-    "star_layer_bloom_strength": 0.14,
+    "star_layer_bloom_strength": 0.18,
     "star_reddening_strength": 1.05,
     "unresolved_spectral_warmth": 0.55,
-    "background_star_density_scale": 0.30,
-    "plane_star_gate_power": 2.45,
-    "cosmic_star_density_scale": 1.0,
-    "halo_star_density_scale": 0.85,
+    # background_star_density_scale stays on FeatureConfig (user dial; do not clobber).
+    "plane_star_gate_power": 2.85,
+    "cosmic_star_density_scale": 0.72,
+    "halo_star_density_scale": 0.62,
     "cosmic_anchor_count": 2,
     "background_texture_strength": 0.08,
     "shadow_lift": 0.020,
-    "star_psf_bloom_scale": 1.18,
+    "star_psf_bloom_scale": 1.72,
     "band_lat_sigma": 0.105,
-    "spike_max_count": 10,
-    "hero_star_count": 6,
-    "hero_lens_ghost_strength": 0.055,
+    "spike_max_count": 8,
+    "hero_star_count": 7,
+    "hero_lens_ghost_strength": 0.085,
+    "unresolved_gas_occlusion": 0.42,
+    "star_shine_through_strength": 0.55,
     "reference_anchors": False,
     "band_curvature_amp": 0.088,
     "volumetric_scatter_strength": 0.42,
@@ -111,10 +130,10 @@ _CINEMATIC_LOOK_UPDATE: dict[str, object] = {
 }
 
 
-# Parked photo / long-exposure stack (opt-in via look_target=documentary).
+# Parked photo grade (look_target=documentary) — no trails / stacked long-exposure.
 _DOCUMENTARY_LOOK_UPDATE: dict[str, object] = {
-    "long_exposure_look": True,
-    "long_exposure_star_trails": True,
+    "long_exposure_look": False,
+    "long_exposure_star_trails": False,
     "galaxy_tone_curve": "asinh",
     "filmic_shoulder": 0.85,
     "filmic_s_curve_strength": 0.12,
@@ -146,6 +165,45 @@ _DOCUMENTARY_LOOK_UPDATE: dict[str, object] = {
     "galactic_band_color_grade_strength": 0.74,
 }
 
+# Tracked deep-field plate: sharp cores, high-contrast voids, dense faint points, no trails.
+_LONG_EXPOSURE_LOOK_UPDATE: dict[str, object] = {
+    **_DOCUMENTARY_LOOK_UPDATE,
+    # Point sources only — no stacked sky-lift theater, no star trails.
+    "long_exposure_look": False,
+    "long_exposure_star_trails": False,
+    # Crisp hierarchy: minimal bloom/halos; only the hottest cores may soft-clip.
+    "star_psf_bloom_scale": 0.12,
+    "star_layer_bloom_strength": 0.0,
+    "display_bloom_strength": 0.0,
+    "bloom_threshold": 0.97,
+    "bloom_mix_tight": 0.70,
+    "bloom_mix_mid": 0.12,
+    "bloom_mix_wide": 0.0,
+    "halation_strength": 0.0,
+    "spike_max_count": 0,
+    "hero_lens_ghost_strength": 0.0,
+    "hero_star_count": 4,
+    "lens_flare_thin_film_strength": 0.0,
+    "chromatic_aberration_strength": 0.18,
+    # True-black voids — do not lift shadows / fog the field.
+    "shadow_lift": 0.0,
+    "nebula_haze_strength": 0.28,
+    "morphology_nebula_haze_scale": 0.22,
+    "background_texture_strength": 0.0,
+    "vignette_strength": 0.35,
+    # Deeper faint population (long integration) without cinematic sparse selection.
+    "background_star_density_scale": 0.95,
+    "cosmic_star_density_scale": 1.55,
+    "halo_star_density_scale": 1.05,
+    "cosmic_anchor_count": 1,
+    "plane_star_gate_power": 1.25,
+    "resolved_faint_dropout": 0.08,
+    "resolved_faint_mag_floor": 15.2,
+    "mag_faint_lim": 21.4,
+    "magnitude_log_slope": 0.78,
+    "m_bloom_cut": 5.5,
+}
+
 
 class FeatureConfig(BaseModel):
     stars: bool = True
@@ -155,8 +213,8 @@ class FeatureConfig(BaseModel):
     look_target: LookTarget = Field(
         LookTarget.cinematic,
         description=(
-            "cinematic=AAA wrap-safe skybox vista (default); "
-            "documentary=parked photo/long-exposure look for later."
+            "cinematic=AAA wrap-safe skybox; documentary=parked photo grade; "
+            "long_exposure=tracked deep field (sharp points, dense faint stars, no trails)."
         ),
     )
     reference_anchors: bool = Field(
@@ -674,10 +732,10 @@ class FeatureConfig(BaseModel):
     )
     background_star_density_scale: float = Field(
         0.30,
-        ge=0.05,
+        ge=0.0,
         le=2.0,
         description=(
-            "Off-plane / cosmic+halo density dial (cinematic ~0.30 ≈ 70% cut). "
+            "Off-plane / cosmic+halo density dial [0–2] (cinematic ~0.30 ≈ 70% cut; 0=off). "
             "Multiplies cosmic and halo catalogs and sky unresolved grain."
         ),
     )
@@ -752,11 +810,21 @@ class FeatureConfig(BaseModel):
         description="Unresolved speckle/integrated-light grain under resolved stars (higher = denser dim field).",
     )
     unresolved_gas_occlusion: float = Field(
-        0.36,
+        0.42,
         ge=0.0,
         le=1.0,
         description=(
-            "Mute unresolved speckle where diffuse gas/emission is thick (grain behind ISM, not through it)."
+            "Mute unresolved speckle where diffuse gas is thick; keep moderate so thin gas "
+            "lets background stars shine through."
+        ),
+    )
+    star_shine_through_strength: float = Field(
+        0.55,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "How strongly faint resolved stars remain visible through thin nebula "
+            "(0=full extinction; 1=strong shine-through on translucent gas)."
         ),
     )
     resolved_faint_mag_floor: float = Field(
@@ -1391,6 +1459,13 @@ class FeatureConfig(BaseModel):
         RenderProfile.full,
         description="physical=linear only; physical_grade=+linear grade; full=display finish.",
     )
+    isolate_layer: IsolateLayer = Field(
+        IsolateLayer.none,
+        description=(
+            "Replace final output with one layer on black: none | background_stars | "
+            "heroes | nebula_gas."
+        ),
+    )
     debug_export_layers: bool = Field(
         False,
         description="Write morphology/star/extinction layer PNGs alongside main output.",
@@ -1497,9 +1572,9 @@ class NebulaTuningConfig(BaseModel):
     Tuning guide (keep this updated as renderer behavior evolves):
     - Out-of-box baseline: use the defaults in this model.
     - Fast first pass: adjust only `style`; then touch one scalar at a time.
-    - `cloud_continuity`: higher = more connected/thicker cloud bands.
-    - `dust_coverage`: higher = dust appears in more places.
-    - `dust_strength`: higher = stronger star/background dimming in dust.
+    - `cloud_continuity` [0–1.6]: higher = more connected/thicker cloud bands; 0 = off.
+    - `dust_coverage` [0–1.6]: higher = dust appears in more places; 0 = none.
+    - `dust_strength` [0–1.8]: higher = stronger star/background dimming in dust; 0 = none.
     Recommended fine-tune ranges after style selection:
     - cloud_continuity: 0.9-1.25
     - dust_coverage: 0.85-1.15
@@ -1512,21 +1587,21 @@ class NebulaTuningConfig(BaseModel):
     )
     cloud_continuity: float = Field(
         1.22,
-        ge=0.6,
+        ge=0.0,
         le=1.6,
-        description="Cloud connectivity/thickness along the galactic band; higher values produce denser connected volumes.",
+        description="Cloud connectivity/thickness [0–1.6]; higher = denser connected volumes; 0 = off.",
     )
     dust_coverage: float = Field(
         1.06,
-        ge=0.5,
+        ge=0.0,
         le=1.6,
-        description="Fraction of the band eligible for dark dust/void carving; lower values create fewer dust regions.",
+        description="Fraction eligible for dark dust [0–1.6]; 0 = none.",
     )
     dust_strength: float = Field(
         1.22,
-        ge=0.5,
+        ge=0.0,
         le=1.8,
-        description="Dust extinction strength against stars/background; raise only after coverage feels right.",
+        description="Dust extinction strength [0–1.8]; 0 = none.",
     )
     emit_halpha_saturation: float = Field(
         0.68,
@@ -1560,6 +1635,10 @@ class RenderConfig(BaseModel):
     seed: int | None = None
     projection_mode: ProjectionMode = ProjectionMode.both
     output_format: OutputFormat = OutputFormat.png
+    scene_mode: SceneMode = Field(
+        SceneMode.normal,
+        description="normal=Milky Way band skybox; nebula=broad cloud-complex vista (no band).",
+    )
     nebula_mode: NebulaMode = NebulaMode.galaxy_streak
     quality: int = Field(100, ge=50, le=100)
     features: FeatureConfig = Field(default_factory=FeatureConfig)
@@ -1590,12 +1669,15 @@ class RenderConfig(BaseModel):
 def apply_look_target_preset(cfg: RenderConfig) -> RenderConfig:
     """Remap display/look scalars for ``features.look_target``.
 
-    Cinematic is the AAA wrap-safe skybox recipe. Documentary restores the parked
-    photo/long-exposure stack. Explicit ``long_exposure_look=True`` under cinematic
-    is preserved (CLI override); documentary always enables the long-exposure path.
+    Cinematic is the AAA wrap-safe skybox recipe. Documentary is parked photo grade.
+    Long-exposure is a tracked deep-field plate (sharp points, denser faint stars,
+    no trails / heavy bloom). Explicit ``long_exposure_look=True`` under cinematic
+    is preserved (CLI override for the legacy stacked-sky theater path).
     """
     f = cfg.features
-    if f.look_target == LookTarget.documentary:
+    if f.look_target == LookTarget.long_exposure:
+        update = dict(_LONG_EXPOSURE_LOOK_UPDATE)
+    elif f.look_target == LookTarget.documentary:
         update = dict(_DOCUMENTARY_LOOK_UPDATE)
     else:
         update = dict(_CINEMATIC_LOOK_UPDATE)
@@ -1708,6 +1790,104 @@ def apply_milky_way_recognition_preset(cfg: RenderConfig) -> RenderConfig:
     return cfg.model_copy(update={"features": tuned})
 
 
+def apply_scene_mode_preset(cfg: RenderConfig) -> RenderConfig:
+    """Remap features for ``scene_mode`` (normal MW band vs broad nebula vista).
+
+    Honors explicit layer toggles: ``stars``, ``nebula``, ``hero_star_enabled``, and
+    user-set ``background_star_density_scale`` (including 0) are not overwritten.
+    """
+    if cfg.scene_mode != SceneMode.nebula:
+        return cfg
+    f = cfg.features
+    # Default look/cinematic floor for density; skip boost when user dialed below it
+    # (including 0) or when background stars are off.
+    bg_default = float(_CINEMATIC_LOOK_UPDATE.get("background_star_density_scale", 0.30))
+    bg_scale = float(f.background_star_density_scale)
+    if f.stars and bg_scale >= bg_default - 1e-9:
+        bg_boosted = max(bg_scale, 0.85)
+    else:
+        bg_boosted = bg_scale
+    look_le = f.look_target == LookTarget.long_exposure
+    halo_scale = float(f.halo_star_density_scale)
+    cosmic_scale = float(f.cosmic_star_density_scale)
+    if f.stars:
+        if look_le:
+            # Preserve deep-field density floors from the long_exposure look preset.
+            halo_scale = max(halo_scale, 0.95) if halo_scale > 1e-9 else halo_scale
+            cosmic_scale = max(cosmic_scale, 1.45) if cosmic_scale > 1e-9 else cosmic_scale
+        else:
+            halo_scale = max(min(halo_scale, 0.85), 0.55) if halo_scale > 1e-9 else halo_scale
+            cosmic_scale = max(cosmic_scale, 1.25) if cosmic_scale > 1e-9 else cosmic_scale
+    update: dict[str, object] = {
+        "milky_way_recognition_preset": False,
+        "lane_star_dropout_boost": 0.0,
+        "lane_star_dropout_power": 1.0,
+        "post_star_lane_protect_strength": 0.0,
+        "dark_rift_strength": 0.0,
+        "dark_rift_coverage": 0.0,
+        "band_ism_dominance": 0.0,
+        "structure_band_core_drive": 0.0,
+        "structure_inner_dust_lane_strength": 0.0,
+        "structure_type_competition": 0.0,
+        "galactic_band_separation_strength": 0.0,
+        "galactic_band_dust_black_strength": 0.0,
+        "galactic_band_color_grade_strength": 0.0,
+        "halo_star_density_scale": halo_scale,
+        "background_star_density_scale": bg_boosted,
+        "cosmic_star_density_scale": cosmic_scale,
+        "plane_star_gate_power": 1.0,
+        "use_spectral_teffective": True,
+        # Grade / photoreal path still needs galaxy_view; MW band gated by use_mw_band().
+        "galaxy_view": True,
+    }
+    if f.nebula and not look_le:
+        update.update(
+            {
+                "nebula_haze_strength": max(f.nebula_haze_strength, 0.38),
+                "morphology_nebula_haze_scale": max(f.morphology_nebula_haze_scale, 0.28),
+                "volumetric_scatter_strength": max(f.volumetric_scatter_strength, 0.55),
+                "off_band_emission_strength": max(f.off_band_emission_strength, 0.55),
+                "unresolved_gas_occlusion": min(f.unresolved_gas_occlusion, 0.28),
+            }
+        )
+    if f.stars or f.hero_star_enabled:
+        if look_le:
+            # Keep sharp-core / no-spoke recipe from look preset.
+            update.update(
+                {
+                    "star_psf_bloom_scale": min(float(f.star_psf_bloom_scale), 0.28),
+                    "star_layer_bloom_strength": 0.0,
+                    "spike_max_count": 0,
+                }
+            )
+        else:
+            update.update(
+                {
+                    "star_psf_bloom_scale": max(f.star_psf_bloom_scale, 1.48),
+                    "star_layer_bloom_strength": max(f.star_layer_bloom_strength, 0.32),
+                    "spike_max_count": max(6, min(10, int(f.spike_max_count))),
+                    "star_shine_through_strength": min(
+                        0.78, max(float(getattr(f, "star_shine_through_strength", 0.55)), 0.62)
+                    ),
+                }
+            )
+    if f.hero_star_enabled and int(f.hero_star_count) > 0 and not look_le:
+        update["hero_star_count"] = max(5, min(8, int(f.hero_star_count)))
+    tuned = f.model_copy(update=update)
+    # Prefer immersive fog scaffold under nebula scene (complex path builds on it).
+    neb_mode = NebulaMode.full if cfg.nebula_mode == NebulaMode.galaxy_streak else cfg.nebula_mode
+    return cfg.model_copy(update={"features": tuned, "nebula_mode": neb_mode})
+
+
+def use_mw_band(cfg: RenderConfig) -> bool:
+    """True when the Milky Way band / BandPlan stack should run."""
+    return cfg.scene_mode == SceneMode.normal and bool(cfg.features.galaxy_view)
+
+
 def finalize_render_config(cfg: RenderConfig) -> RenderConfig:
-    """Apply look-target then Milky-Way recognition presets before render."""
-    return apply_milky_way_recognition_preset(apply_look_target_preset(cfg))
+    """Apply look-target, scene-mode, then Milky-Way recognition presets before render."""
+    cfg = apply_look_target_preset(cfg)
+    cfg = apply_scene_mode_preset(cfg)
+    if cfg.scene_mode == SceneMode.nebula:
+        return cfg
+    return apply_milky_way_recognition_preset(cfg)

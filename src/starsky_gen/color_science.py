@@ -245,8 +245,7 @@ def attenuate_chroma_multipliers(
 ) -> tuple[float, float, float]:
     """Blend per-channel RGB factors toward neutral (1, 1, 1)."""
     w = float(np.clip(weight, 0.0, 1.0))
-    scaled = tuple(1.0 + (float(f) - 1.0) * w for f in factors)
-    return (float(scaled[0]), float(scaled[1]), float(scaled[2]))
+    return tuple(1.0 + (float(f) - 1.0) * w for f in factors)
 
 
 def star_rgb_from_teffective(

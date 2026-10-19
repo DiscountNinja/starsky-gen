@@ -7,6 +7,7 @@ from rich.console import Console
 
 from starsky_gen import guided as guided_mod
 from starsky_gen.config import LookTarget, NebulaMode, OutputFormat, ProjectionMode
+from starsky_gen.config import SceneMode
 from starsky_gen.guided import (
     STOCK_DEFAULTS,
     GuidedCancelled,
@@ -18,6 +19,7 @@ from starsky_gen.guided import (
     prompt_output_type,
     prompt_size_preset,
     run_guided_prompts,
+    should_prompt,
     should_run_guided,
 )
 
@@ -71,7 +73,7 @@ def test_format_equivalent_command_omits_defaults() -> None:
     values["width"] = 4096
     values["height"] = 2048
     values["cube"] = True
-    values["noheroes"] = True
+    values["heroes"] = False
     values["seed"] = 77
     values["look_target"] = LookTarget.documentary
     cmd = format_equivalent_command(values)
@@ -80,6 +82,7 @@ def test_format_equivalent_command_omits_defaults() -> None:
     assert "--height 2048" in cmd
     assert "--cube" in cmd
     assert "--noheroes" in cmd
+    assert "--heroes" not in cmd
     assert "--seed 77" in cmd
     assert "--look-target documentary" in cmd
     assert "--output-format" not in cmd  # still default png
@@ -98,14 +101,34 @@ def test_format_guided_summary_readable() -> None:
     values["height"] = 4096
     values["projection_mode"] = ProjectionMode.both
     values["seed"] = 42
-    values["noheroes"] = True
+    values["heroes"] = False
     values["look_target"] = LookTarget.documentary
+    values["nebula"] = False
+    values["black_background"] = True
     text = "\n".join(format_guided_summary(values))
+    assert "Intent:" in text
     assert "8192×4096" in text
-    assert "Output type: both" in text
-    assert "Seed: 42" in text
+    assert "both" in text
+    assert "seed 42" in text
     assert "documentary" in text
-    assert "Heroes: off" in text
+    assert "heroes=off" in text
+    assert "no nebula gas" in text
+    assert "black void" in text or "forced black" in text
+
+
+def test_should_prompt_skips_dead_followups() -> None:
+    answers = dict(STOCK_DEFAULTS)
+    answers["scene_mode"] = SceneMode.nebula
+    gv = next(f for f in guided_mod.GUIDED_FIELDS if f.key == "galaxy_view")
+    assert should_prompt(gv, answers) is False
+    answers["scene_mode"] = SceneMode.normal
+    answers["nebula"] = False
+    dust = next(f for f in guided_mod.GUIDED_FIELDS if f.key == "dust_coverage")
+    assert should_prompt(dust, answers) is False
+    answers["nebula"] = True
+    answers["stars"] = False
+    dens = next(f for f in guided_mod.GUIDED_FIELDS if f.key == "background_density")
+    assert should_prompt(dens, answers) is False
 
 
 @pytest.fixture
@@ -193,7 +216,8 @@ def test_run_guided_8k_both_then_advanced(
     )
     answers.extend([""] * core_rest)
     answers.append("y")
-    answers.extend(["", "", "", "y", "", "", ""])
+    # advanced: jpeg, render_profile, isolate, nebula_debug, debug_layers=y, grayscale, void, scar
+    answers.extend(["", "", "", "", "y", "", "", ""])
 
     idx = {"i": 0}
 

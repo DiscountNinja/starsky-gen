@@ -151,7 +151,7 @@ def paint_hero_lens_ghosts(
         ts = np.linspace(-length, length, int(length * 2) + 1)
         for t in ts:
             fall = float(np.exp(-(abs(t) / max(length, 1e-3)) ** 1.6))
-            for arm_scale, arm_amp in ((1.0, 0.22), (0.55, 0.14)):
+            for arm_scale, arm_amp in ((1.0, 0.42), (0.55, 0.26)):
                 a = ang if arm_scale >= 0.99 else ang + 0.5 * np.pi
                 px = x + np.cos(a) * t * arm_scale
                 py = y + np.sin(a) * t * arm_scale

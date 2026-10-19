@@ -15,6 +15,7 @@ from rich.console import Console
 CopyrightStatus = Literal["copyrighted", "open", "unknown"]
 
 LICENSE_FILENAME = ".license"
+# Kept for call-site compat; open/copyrighted never re-prompt (unknown always does).
 PROMPT_EVERY_N = 20
 DEFAULT_STATUS: CopyrightStatus = "unknown"
 VALID_STATUSES: frozenset[str] = frozenset({"copyrighted", "open", "unknown"})
@@ -62,8 +63,25 @@ class LicenseState:
 
 
 def license_path(cwd: Path | None = None) -> Path:
-    root = Path.cwd() if cwd is None else Path(cwd)
-    return root / LICENSE_FILENAME
+    """Resolve ``.license`` from cwd, walking up to an existing file or project root.
+
+    Using bare ``Path.cwd() / .license`` re-prompted whenever generate was run from
+    a subdirectory (or a fresh clone path) that did not see the repo-root file.
+    """
+    start = (Path.cwd() if cwd is None else Path(cwd)).resolve()
+    if start.is_file():
+        start = start.parent
+
+    # Prefer an existing .license on the path to root.
+    for folder in (start, *start.parents):
+        candidate = folder / LICENSE_FILENAME
+        if candidate.is_file():
+            return candidate
+        # Stop at repo root even if .license is not created yet.
+        if (folder / "pyproject.toml").is_file():
+            return folder / LICENSE_FILENAME
+
+    return start / LICENSE_FILENAME
 
 
 def default_license_state() -> LicenseState:
@@ -95,18 +113,10 @@ def _normalize_status(value: object) -> CopyrightStatus:
 def _parse_optional_int(value: object) -> int | None:
     if value is None or value == "":
         return None
-    if isinstance(value, bool):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
         return None
-    if isinstance(value, int):
-        return int(value)
-    if isinstance(value, float):
-        return int(value)
-    if isinstance(value, str):
-        try:
-            return int(value)
-        except ValueError:
-            return None
-    return None
 
 
 def _parse_optional_str(value: object) -> str | None:
@@ -170,6 +180,10 @@ def _state_from_mapping(raw: dict[str, Any]) -> LicenseState:
         rights = status
         holder = None
 
+    # Missing last_prompt_at on open/copyrighted used to re-prompt every generate.
+    if status in ("open", "copyrighted") and last_prompt_at is None:
+        last_prompt_at = run_count
+
     return LicenseState(
         copyright_status=status,
         copyright_holder=holder if status == "copyrighted" else None,
@@ -226,7 +240,6 @@ def save_license(state: LicenseState, path: Path | None = None) -> None:
     status = _normalize_status(state.copyright_status)
     year = state.resolved_year()
     holder = (state.copyright_holder or "").strip() if status == "copyrighted" else ""
-    rights: str
     if status in ("open", "unknown"):
         rights = status
     else:
@@ -246,40 +259,43 @@ def save_license(state: LicenseState, path: Path | None = None) -> None:
 
 
 def should_prompt(state: LicenseState, *, every_n: int = PROMPT_EVERY_N) -> bool:
-    """Unknown always re-prompts; copyrighted/open remind every N runs."""
-    if _normalize_status(state.copyright_status) == "unknown":
-        return True
-    n = max(1, int(every_n))
-    if state.last_prompt_at is None:
-        return True
-    return int(state.run_count) - int(state.last_prompt_at) >= n
+    """Prompt only while status is unknown. Open/copyrighted stay quiet.
+
+    ``every_n`` is unused (kept so older call sites keep working). The nudge is
+    legal awareness on first use — not a recurring interrupt once set.
+    """
+    del every_n  # API compat only
+    return _normalize_status(state.copyright_status) == "unknown"
 
 
 def prompt_copyright_status(console: Console, *, current: LicenseState | None = None) -> CopyrightStatus:
-    """Letter prompt: C/O/U (or Enter → unknown). Loops until a letter is recognized."""
+    """Letter prompt: C/O/U. Enter = unknown (will ask again next generate)."""
     cur = current or default_license_state()
+    cur_status = _normalize_status(cur.copyright_status)
     extras: list[str] = []
     if cur.copyright_holder:
         extras.append(f"holder={cur.copyright_holder!r}")
-    if cur.distribution_rights and cur.copyright_status == "copyrighted":
+    if cur.distribution_rights and cur_status == "copyrighted":
         extras.append(f"license={cur.distribution_rights!r}")
     extra = (", " + ", ".join(extras)) if extras else ""
     console.print(
         "[dim]Copyright status for generated images[/dim] "
-        f"[dim](current:[/dim] {cur.copyright_status}{extra}"
+        f"[dim](current:[/dim] {cur_status}{extra}"
         f", year={cur.resolved_year()}[dim])[/dim]"
     )
     console.print(
         "[dim]Choose[/dim] [bold]C[/bold]opyrighted / [bold]O[/bold]pen / "
         "[bold]U[/bold]nknown "
-        "[dim](Enter = Unknown; unknown will ask again next generate)[/dim]"
+        "[dim](Enter = Unknown; unknown asks again next generate — "
+        "open/copyrighted will not ask again)[/dim]"
     )
     while True:
         try:
             answer = input("(C/O/U) ").strip()
         except (KeyboardInterrupt, EOFError):
             console.print("")
-            return "unknown"
+            # Do not silently downgrade a set preference to unknown.
+            return cur_status
         if not answer:
             return "unknown"
         status = _normalize_status(answer)
@@ -376,8 +392,8 @@ def maybe_prompt_before_generate(
 ) -> LicenseState:
     """Load `.license`, optionally prompt, persist, and return the active state.
 
-    Flow: C/O/U first. Open/unknown mirrors into distribution_rights (no further prompts).
-    Copyrighted asks license/distribution rights, then optional holder name.
+    Prompts only while status is unknown. Open/copyrighted are left alone.
+    Flow: C/O/U; copyrighted then asks distribution rights and optional holder.
     """
     p = license_path() if path is None else Path(path)
     state = load_license(p)
@@ -435,8 +451,6 @@ def record_generations(
         base = state if state.copyright_status != "unknown" else current
 
     status = _normalize_status(base.copyright_status)
-    rights: str
-    holder: str | None
     if status in ("open", "unknown"):
         rights = status
         holder = None

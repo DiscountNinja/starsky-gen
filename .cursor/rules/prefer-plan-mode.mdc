@@ -1,0 +1,25 @@
+---
+description: Proactively switch to Plan mode when planning would help
+alwaysApply: true
+---
+
+# Prefer Plan Mode When Helpful
+
+Before diving into implementation, proactively switch to Plan mode (`SwitchMode` → `plan`) when planning would meaningfully improve the outcome.
+
+## Switch to Plan when
+
+- The task has multiple valid approaches with meaningful trade-offs
+- Architectural or design decisions are needed before coding
+- The work spans many files/systems, or scope is large/unclear
+- Requirements are ambiguous and exploring first would reduce rework
+- You would otherwise ask several clarifying questions in a row
+- The user asks to design, compare options, or decide an approach
+
+## Stay in Agent when
+
+- The task is small, clear, and the path is obvious
+- You are mid-implementation and making good progress
+- The user explicitly asked for immediate implementation
+
+When switching, give a brief explanation of why Plan mode helps. Do not over-switch for trivial work.

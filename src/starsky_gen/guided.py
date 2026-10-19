@@ -10,7 +10,14 @@ from typing import Any, Literal, Sequence
 
 from rich.console import Console
 
-from starsky_gen.config import LookTarget, NebulaMode, OutputFormat, ProjectionMode
+from starsky_gen.config import (
+    IsolateLayer,
+    LookTarget,
+    NebulaMode,
+    OutputFormat,
+    ProjectionMode,
+    SceneMode,
+)
 
 FieldKind = Literal[
     "int",
@@ -85,6 +92,7 @@ STOCK_DEFAULTS: dict[str, Any] = {
     "projection_mode": ProjectionMode.equirectangular,
     "cube": False,
     "output_format": OutputFormat.png,
+    "scene_mode": SceneMode.normal,
     "nebula_mode": NebulaMode.galaxy_streak,
     "quality": 100,
     "cubemap_face_size": 1024,
@@ -96,7 +104,6 @@ STOCK_DEFAULTS: dict[str, Any] = {
     "black_background": False,
     "jpeg_artifact_pass": False,
     "look_target": LookTarget.cinematic,
-    "long_exposure_look": False,
     "background_texture_strength": 1.0,
     "nebula_style": "balanced",
     "cloud_continuity": 1.22,
@@ -104,16 +111,26 @@ STOCK_DEFAULTS: dict[str, Any] = {
     "dust_strength": 1.14,
     "nebula_debug_pass": "normal",
     "render_profile": "full",
+    "isolate_layer": IsolateLayer.none,
     "debug_export_layers": False,
     "debug_grayscale_morphology": False,
     "morphology_void_strength": 0.72,
     "morphology_scar_strength": 0.68,
-    "noheroes": False,
+    "heroes": True,
     "background_density": None,
 }
 
 
 GUIDED_FIELDS: list[GuidedField] = [
+    GuidedField(
+        "scene_mode",
+        "--mode",
+        "Scene mode",
+        "normal=Milky Way band skybox; nebula=full-sky cloud complex (no galactic band).",
+        "enum",
+        SceneMode.normal,
+        choices=_enum_values(SceneMode),
+    ),
     GuidedField(
         "width",
         "--width",
@@ -215,8 +232,8 @@ GUIDED_FIELDS: list[GuidedField] = [
     GuidedField(
         "stars",
         "--stars/--no-stars",
-        "Stars",
-        "Enable star generation.",
+        "Background stars",
+        "Band/mid/cosmic/halo star catalogs (not hero stars).",
         "bool",
         True,
         cli_style="neg_flag",
@@ -224,10 +241,21 @@ GUIDED_FIELDS: list[GuidedField] = [
         flag_off="--no-stars",
     ),
     GuidedField(
+        "heroes",
+        "--noheroes",
+        "Hero stars",
+        "Bright heroes with spikes/ghosts (independent of background stars). Off → --noheroes.",
+        "bool",
+        True,
+        cli_style="neg_flag",
+        flag_on="--heroes",
+        flag_off="--noheroes",
+    ),
+    GuidedField(
         "depth",
         "--depth/--no-depth",
         "Depth falloff",
-        "Enable depth-style intensity falloff.",
+        "Dim catalog stars toward the poles (not camera DOF).",
         "bool",
         True,
         cli_style="neg_flag",
@@ -238,7 +266,7 @@ GUIDED_FIELDS: list[GuidedField] = [
         "nebula",
         "--nebula/--no-nebula",
         "Nebula",
-        "Enable nebula rendering.",
+        "Enable nebula gas rendering. Off skips nebula-mode/style/dust prompts.",
         "bool",
         True,
         cli_style="neg_flag",
@@ -249,7 +277,7 @@ GUIDED_FIELDS: list[GuidedField] = [
         "galaxy_view",
         "--galaxy-view/--no-galaxy-view",
         "Galaxy view",
-        "Bias star density toward galactic plane.",
+        "Enable Milky Way band + plane-biased stars (normal mode only; skipped in nebula scene).",
         "bool",
         True,
         cli_style="neg_flag",
@@ -280,27 +308,17 @@ GUIDED_FIELDS: list[GuidedField] = [
         "look_target",
         "--look-target",
         "Look target",
-        "cinematic=AAA wrap-safe skybox (default); documentary=parked photo/long-exposure look.",
+        "cinematic=wrap-safe skybox; documentary=parked photo grade; "
+        "long_exposure=tracked deep field (sharp points, denser faint stars).",
         "enum",
         LookTarget.cinematic,
         choices=_enum_values(LookTarget),
     ),
     GuidedField(
-        "long_exposure_look",
-        "--long-exposure-look/--flat-exposure",
-        "Long-exposure look",
-        "Asymmetric stacked-frame grade. Default off for wrap-safe skyboxes.",
-        "bool",
-        False,
-        cli_style="toggle_pair",
-        flag_on="--long-exposure-look",
-        flag_off="--flat-exposure",
-    ),
-    GuidedField(
         "background_texture_strength",
         "--background-texture-strength",
         "Background texture strength",
-        "Scale unresolved-star background texture (0 smooth, 1 default, 2 gritty).",
+        "Unresolved-star grain [0–2]: 0=smooth, 1=default, 2=gritty.",
         "float",
         1.0,
         min_v=0.0,
@@ -310,7 +328,7 @@ GUIDED_FIELDS: list[GuidedField] = [
         "nebula_mode",
         "--nebula-mode",
         "Nebula mode",
-        "Nebula style: distant, full, or galaxy_streak.",
+        "distant=isolated feature; full=immersive fog; galaxy_streak=MW-like plane (normal mode).",
         "enum",
         NebulaMode.galaxy_streak,
         choices=_enum_values(NebulaMode),
@@ -319,7 +337,7 @@ GUIDED_FIELDS: list[GuidedField] = [
         "nebula_style",
         "--nebula-style",
         "Nebula style",
-        "Nebula preset: subtle, balanced, or dramatic.",
+        "Gas look preset: subtle, balanced, or dramatic.",
         "enum",
         "balanced",
         choices=("subtle", "balanced", "dramatic"),
@@ -328,49 +346,40 @@ GUIDED_FIELDS: list[GuidedField] = [
         "cloud_continuity",
         "--cloud-continuity",
         "Cloud continuity",
-        "Connect/thicken cloud volumes along the galactic band.",
+        "Connect/thicken cloud volumes [0–1.6]; 0=off.",
         "float",
         1.22,
-        min_v=0.6,
+        min_v=0.0,
         max_v=1.6,
     ),
     GuidedField(
         "dust_coverage",
         "--dust-coverage",
         "Dust coverage",
-        "How much of the band can contain dark dust regions.",
+        "How much area can hold dark dust [0–1.6]; 0=none.",
         "float",
         0.98,
-        min_v=0.5,
+        min_v=0.0,
         max_v=1.6,
     ),
     GuidedField(
         "dust_strength",
         "--dust-strength",
         "Dust strength",
-        "How strongly dust regions dim stars and background.",
+        "How strongly dust dims stars/background [0–1.8]; 0=none.",
         "float",
         1.14,
-        min_v=0.5,
+        min_v=0.0,
         max_v=1.8,
-    ),
-    GuidedField(
-        "noheroes",
-        "--noheroes",
-        "Disable hero stars",
-        "Disable procedural hero stars (spikes / lens ghosts).",
-        "bool",
-        False,
-        cli_style="flag",
     ),
     GuidedField(
         "background_density",
         "--background-density",
         "Background density",
-        "Off-plane/cosmic+halo density scale (cinematic default ~0.30). Blank = use look default.",
+        "Off-plane/cosmic/halo star density [0–2]; cinematic~0.30. Blank=look default. Skip if background stars off.",
         "optional_float",
         None,
-        min_v=0.05,
+        min_v=0.0,
         max_v=2.0,
     ),
     # Advanced
@@ -388,11 +397,21 @@ GUIDED_FIELDS: list[GuidedField] = [
         "render_profile",
         "--render-profile",
         "Render profile",
-        "Render pipeline: physical | physical_grade | full.",
+        "physical=linear only; physical_grade=+linear grade; full=+display finish/grain.",
         "enum",
         "full",
         group="advanced",
         choices=("physical", "physical_grade", "full"),
+    ),
+    GuidedField(
+        "isolate_layer",
+        "--isolate-layer",
+        "Isolate layer",
+        "Final plate on black: none | background_stars | heroes | nebula_gas.",
+        "enum",
+        IsolateLayer.none,
+        group="advanced",
+        choices=_enum_values(IsolateLayer),
     ),
     GuidedField(
         "nebula_debug_pass",
@@ -736,6 +755,11 @@ def format_equivalent_command(
             off = spec.flag_off or (
                 spec.flag.split("/")[1] if "/" in spec.flag else f"--no-{key.replace('_', '-')}"
             )
+            # heroes: only `--noheroes` exists on CLI (no affirmative flag).
+            if key == "heroes":
+                if not bool(val):
+                    parts.append(off)
+                continue
             parts.append(on if bool(val) else off)
             continue
         if spec.cli_style == "toggle_pair":
@@ -771,8 +795,62 @@ def _as_label(value: Any) -> str:
     return str(value)
 
 
+def _scene_intent_line(values: dict[str, Any]) -> str:
+    """One-line plain-language description of what the render will look like."""
+    scene = values.get("scene_mode", SceneMode.normal)
+    scene_s = scene.value if isinstance(scene, Enum) else str(scene)
+    stars = bool(values.get("stars", True))
+    heroes = bool(values.get("heroes", True))
+    # Guided uses heroes=True; CLI path may pass noheroes.
+    if "heroes" not in values and "noheroes" in values:
+        heroes = not bool(values.get("noheroes"))
+    nebula = bool(values.get("nebula", True))
+    black = bool(values.get("black_background", False))
+    isolate = values.get("isolate_layer", IsolateLayer.none)
+    if isinstance(isolate, Enum):
+        isolate_s = isolate.value
+    else:
+        isolate_s = str(isolate or "none")
+
+    if isolate_s not in ("none", ""):
+        labels = {
+            "background_stars": "background-star plate only (on black)",
+            "heroes": "hero-star plate only (on black)",
+            "nebula_gas": "nebula-gas plate only (on black)",
+        }
+        return labels.get(isolate_s, f"isolated {isolate_s} plate")
+
+    parts: list[str] = []
+    if scene_s == "nebula":
+        parts.append("full-sky cloud-complex scene (no MW band)")
+    else:
+        galaxy = bool(values.get("galaxy_view", True))
+        parts.append("Milky Way band skybox" if galaxy else "skybox without MW band")
+
+    layer_bits: list[str] = []
+    if nebula:
+        style = _as_label(values.get("nebula_style", "balanced"))
+        layer_bits.append(f"nebula gas ({style})")
+    else:
+        layer_bits.append("no nebula gas")
+    if stars and heroes:
+        layer_bits.append("background stars + heroes")
+    elif stars:
+        layer_bits.append("background stars only")
+    elif heroes:
+        layer_bits.append("hero stars only")
+    else:
+        layer_bits.append("no stars")
+    if black:
+        layer_bits.append("black void")
+    parts.append(", ".join(layer_bits))
+    look = _as_label(values.get("look_target", "cinematic"))
+    parts.append(f"{look} look")
+    return " · ".join(parts)
+
+
 def format_guided_summary(values: dict[str, Any]) -> list[str]:
-    """Short human-readable lines for the pre-render confirm."""
+    """Short human-readable lines for the pre-render confirm (what you will get)."""
     w = int(values.get("width", 2048))
     h = int(values.get("height", 1024))
     proj = _as_label(values.get("projection_mode", "equirectangular"))
@@ -785,29 +863,57 @@ def format_guided_summary(values: dict[str, Any]) -> list[str]:
     dens = values.get("background_density")
     dens_s = _as_label(dens) if dens is not None else "look default"
 
+    heroes = bool(values.get("heroes", True))
+    if "heroes" not in values and "noheroes" in values:
+        heroes = not bool(values.get("noheroes"))
+
+    scene = values.get("scene_mode", SceneMode.normal)
+    scene_s = scene.value if isinstance(scene, Enum) else str(scene)
+    galaxy = bool(values.get("galaxy_view", True))
+    if scene_s == "nebula":
+        galaxy_s = "n/a (nebula scene)"
+    else:
+        galaxy_s = "on (MW band)" if galaxy else "off (no band)"
+
     lines = [
-        f"Size: {w}×{h}",
-        f"Output type: {proj}",
+        f"Intent: {_scene_intent_line(values)}",
+        f"Canvas: {w}×{h}  ·  {proj}  ·  "
+        f"{_as_label(values.get('output_format', 'png'))}",
         f"Output: {_as_label(values.get('output_dir', 'output'))}/"
-        f"{_as_label(values.get('output_base_name', 'starsky'))} "
-        f"({_as_label(values.get('output_format', 'png'))})",
-        f"Generations: {int(values.get('generations', 1))}  ·  Seed: {seed_s}",
-        f"Cubemap face: {int(values.get('cubemap_face_size', 1024))}",
+        f"{_as_label(values.get('output_base_name', 'starsky'))}  ·  "
+        f"{int(values.get('generations', 1))} gen  ·  seed {seed_s}",
         f"Look: {_as_label(values.get('look_target', 'cinematic'))}  ·  "
-        f"Exposure: {'long' if values.get('long_exposure_look') else 'flat'}",
-        f"Nebula: {_as_label(values.get('nebula_mode', 'galaxy_streak'))} / "
-        f"{_as_label(values.get('nebula_style', 'balanced'))}  ·  "
-        f"Enabled: {_as_label(values.get('nebula', True))}",
-        f"Stars: {_as_label(values.get('stars', True))}  ·  "
-        f"Galaxy view: {_as_label(values.get('galaxy_view', True))}  ·  "
-        f"Heroes: {'off' if values.get('noheroes') else 'on'}",
-        f"Background density: {dens_s}  ·  "
-        f"Texture: {_as_label(values.get('background_texture_strength', 1.0))}",
+        f"Scene: {scene_s}  ·  Galaxy view: {galaxy_s}",
+        f"Layers: bg stars={'on' if values.get('stars', True) else 'off'}  ·  "
+        f"heroes={'on' if heroes else 'off'}  ·  "
+        f"nebula={'on' if values.get('nebula', True) else 'off'}",
     ]
+    if values.get("nebula", True):
+        lines.append(
+            f"Nebula: {_as_label(values.get('nebula_mode', 'galaxy_streak'))} / "
+            f"{_as_label(values.get('nebula_style', 'balanced'))}  ·  "
+            f"continuity {_as_label(values.get('cloud_continuity', 1.22))}  ·  "
+            f"dust {_as_label(values.get('dust_coverage', 0.98))}/"
+            f"{_as_label(values.get('dust_strength', 1.14))}"
+        )
+    if values.get("stars", True):
+        lines.append(
+            f"Star field: density {dens_s}  ·  "
+            f"texture {_as_label(values.get('background_texture_strength', 1.0))}  ·  "
+            f"depth falloff={'on' if values.get('depth', True) else 'off'}"
+        )
+    isolate = values.get("isolate_layer", IsolateLayer.none)
+    if isolate not in (None, IsolateLayer.none, "none"):
+        lines.append(f"Isolate: {_as_label(isolate)} plate on black")
     if values.get("black_background"):
-        lines.append("Background: black")
+        lines.append("Background: forced black")
     elif not values.get("background_gradient", True):
         lines.append("Background: no gradient")
+    if proj in ("cubemap", "both", "both (--cube)"):
+        lines.append(f"Cubemap face: {int(values.get('cubemap_face_size', 1024))}px")
+    profile = values.get("render_profile", "full")
+    if profile not in (None, "full"):
+        lines.append(f"Render profile: {_as_label(profile)}")
     if values.get("debug_export_layers") or values.get("debug_grayscale_morphology"):
         bits = []
         if values.get("debug_export_layers"):
@@ -821,7 +927,7 @@ def format_guided_summary(values: dict[str, Any]) -> list[str]:
 def print_guided_confirm(console: Console, values: dict[str, Any]) -> None:
     """Print summary + equivalent CLI before Start render?"""
     console.print("")
-    console.print("[bold]Summary[/bold]")
+    console.print("[bold]About to render[/bold]")
     for line in format_guided_summary(values):
         console.print(f"  {line}")
     console.print("")
@@ -830,8 +936,46 @@ def print_guided_confirm(console: Console, values: dict[str, Any]) -> None:
     console.print("")
 
 
+def print_render_preview(console: Console, values: dict[str, Any]) -> None:
+    """Compact pre-render recap for non-guided CLI runs."""
+    console.print("")
+    console.print("[bold]About to render[/bold]")
+    for line in format_guided_summary(values):
+        console.print(f"  {line}")
+    console.print("")
+
+
 def confirm_start_render(console: Console) -> bool:
     return prompt_yes_no(console, "Start render?", default=True)
+
+
+def should_prompt(spec: GuidedField, answers: dict[str, Any]) -> bool:
+    """Skip follow-up prompts when a parent layer/mode is off."""
+    key = spec.key
+    scene = answers.get("scene_mode", SceneMode.normal)
+    if isinstance(scene, str):
+        try:
+            scene = SceneMode(scene)
+        except ValueError:
+            scene = SceneMode.normal
+    if key == "galaxy_view" and scene == SceneMode.nebula:
+        return False
+    if key in (
+        "nebula_mode",
+        "nebula_style",
+        "cloud_continuity",
+        "dust_coverage",
+        "dust_strength",
+        "nebula_debug_pass",
+    ) and not bool(answers.get("nebula", True)):
+        return False
+    if key == "background_density" and not bool(answers.get("stars", True)):
+        return False
+    if key == "depth" and not bool(answers.get("stars", True)) and not bool(
+        answers.get("heroes", True)
+    ):
+        return False
+    return True
 
 
 def run_guided_prompts(
@@ -872,7 +1016,18 @@ def run_guided_prompts(
     values["projection_mode"] = mode
     values["cube"] = cube
 
-    skip_proj = {"projection_mode", "cube"}
+    # Scene mode early (after size / output type).
+    scene_spec = next(f for f in GUIDED_FIELDS if f.key == "scene_mode")
+    console.print("")
+    try:
+        values["scene_mode"] = prompt_field(
+            console, scene_spec, values.get("scene_mode", scene_spec.default)
+        )
+    except GuidedCancelled:
+        console.print("[dim]Guided cancelled (no render).[/dim]")
+        return None
+
+    skip_proj = {"projection_mode", "cube", "scene_mode"}
     for spec in GUIDED_FIELDS:
         if spec.group != "core":
             continue
@@ -880,12 +1035,18 @@ def run_guided_prompts(
             continue
         if spec.key in skip_proj:
             continue
+        if not should_prompt(spec, values):
+            continue
         console.print("")
         try:
             values[spec.key] = prompt_field(console, spec, values.get(spec.key, spec.default))
         except GuidedCancelled:
             console.print("[dim]Guided cancelled (no render).[/dim]")
             return None
+
+    # Nebula scene never uses MW band; keep galaxy_view True for grade/photoreal.
+    if values.get("scene_mode") == SceneMode.nebula or values.get("scene_mode") == "nebula":
+        values["galaxy_view"] = True
 
     console.print("")
     try:
@@ -897,6 +1058,8 @@ def run_guided_prompts(
     if do_adv:
         for spec in GUIDED_FIELDS:
             if spec.group != "advanced":
+                continue
+            if not should_prompt(spec, values):
                 continue
             console.print("")
             try:
