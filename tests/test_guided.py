@@ -117,6 +117,19 @@ def test_format_guided_summary_readable() -> None:
     assert "black void" in text or "forced black" in text
 
 
+def test_format_guided_summary_seed_range_and_summary_string() -> None:
+    values = dict(STOCK_DEFAULTS)
+    values["seed"] = 42
+    values["generations"] = 40
+    text = "\n".join(format_guided_summary(values))
+    assert "seed 42–81" in text
+    # Preformatted summaries must not crash int().
+    values["seed"] = "seed 42"
+    values["generations"] = 1
+    text2 = "\n".join(format_guided_summary(values))
+    assert "seed 42" in text2
+
+
 def test_format_guided_summary_includes_nebula_hero_color() -> None:
     values = dict(STOCK_DEFAULTS)
     values["scene_mode"] = SceneMode.nebula

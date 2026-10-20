@@ -856,15 +856,18 @@ def format_guided_summary(values: dict[str, Any]) -> list[str]:
 
     seed = values.get("seed")
     n_gen = int(values.get("generations", 1))
-    if seed is not None:
+    if seed is None:
+        seed_s = "unique random per gen" if n_gen > 1 else "random"
+    elif isinstance(seed, str) and not str(seed).strip().lstrip("+-").isdigit():
+        # Already a human summary (e.g. from batch_seeds); don't int()-parse it.
+        seed_s = str(seed).removeprefix("seed ").strip()
+    else:
         seed_i = int(seed)
         seed_s = (
             f"{seed_i}–{seed_i + n_gen - 1}"
             if n_gen > 1
             else _as_label(seed)
         )
-    else:
-        seed_s = "unique random per gen" if n_gen > 1 else "random"
     dens = values.get("background_density")
     dens_s = _as_label(dens) if dens is not None else "look default"
 

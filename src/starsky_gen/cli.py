@@ -732,7 +732,8 @@ def _run_generate(
                 "output_base_name": cfg.output_base_name,
                 "output_dir": cfg.output_dir,
                 "generations": cfg.generations,
-                "seed": format_batch_seed_summary(seed, batch_seeds),
+                # Numeric CLI seed (or None) — summary strings break format_guided_summary.
+                "seed": seed,
                 "projection_mode": cfg.projection_mode,
                 "cube": False,
                 "output_format": cfg.output_format,
