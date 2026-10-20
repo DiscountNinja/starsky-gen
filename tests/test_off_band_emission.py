@@ -61,7 +61,7 @@ def test_off_band_hii_seed_stable() -> None:
 
 
 def test_localize_emission_clouds_shrinks_footprint() -> None:
-    h, w = 128, 256
+    h, _w = 128, 256
     yy = np.linspace(-1.0, 1.0, h, dtype=np.float64)[:, None]
     wash = np.clip(0.35 + 0.25 * yy**2, 0.0, 1.0)
     mask = np.clip(1.0 - np.abs(yy) * 0.55, 0.0, 1.0)

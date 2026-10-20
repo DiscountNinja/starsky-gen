@@ -117,6 +117,15 @@ def test_format_guided_summary_readable() -> None:
     assert "black void" in text or "forced black" in text
 
 
+def test_format_guided_summary_includes_nebula_hero_color() -> None:
+    values = dict(STOCK_DEFAULTS)
+    values["scene_mode"] = SceneMode.nebula
+    values["nebula"] = True
+    values["nebula_hero_color"] = "blue"
+    text = "\n".join(format_guided_summary(values))
+    assert "hero color blue" in text
+
+
 def test_should_prompt_skips_dead_followups() -> None:
     answers = dict(STOCK_DEFAULTS)
     answers["scene_mode"] = SceneMode.nebula

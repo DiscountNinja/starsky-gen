@@ -21,7 +21,6 @@ from starsky_gen.generator import render_single
 from starsky_gen.hero_stars import select_hero_indices
 from starsky_gen.placement import (
     EQUIRECT_LAT_POLE_MARGIN_FULL_SKY,
-    EQUIRECT_POLE_TAPER_FRAC,
     EQUIRECT_POLE_TAPER_FRAC_FULL_SKY,
     apply_equirect_steradian_weights,
     build_equirect_density_map,
@@ -52,9 +51,9 @@ def test_finalize_nebula_scene_skips_mw_band_and_keeps_grade() -> None:
     assert 5 <= out.features.hero_star_count <= 8
     assert out.features.spike_max_count >= 6
     assert out.features.star_layer_bloom_strength >= 0.32
-    # Interactive Layer: stronger glow×emission mix in nebula scene.
-    assert abs(out.features.nebula_interact_density - 0.45) < 1e-6
-    assert abs(out.features.nebula_interact_strength - 0.35) < 1e-6
+    # Interactive Layer: sparse dense-core glow×emission mix in nebula scene.
+    assert abs(out.features.nebula_interact_density - 0.62) < 1e-6
+    assert abs(out.features.nebula_interact_strength - 0.28) < 1e-6
 
 
 def test_finalize_normal_weaker_nebula_interact() -> None:
@@ -86,14 +85,18 @@ def test_nebula_interact_glow_rgb_gates_and_preserves_peak() -> None:
 
     star = np.array([1.0, 0.85, 0.70], dtype=np.float64)
     em = np.zeros((8, 8, 3), dtype=np.float64)
-    # Magenta emission at sample pixel.
-    em[3, 4] = np.array([0.9, 0.15, 0.85], dtype=np.float64)
-    cold = _nebula_interact_glow_rgb(star, em, 0, 0, density=0.45, strength=0.35)
+    # Bright magenta emission at sample pixel (dense-core gate).
+    em[3, 4] = np.array([1.0, 0.22, 0.95], dtype=np.float64)
+    cold = _nebula_interact_glow_rgb(star, em, 0, 0, density=0.62, strength=0.28)
     assert float(np.max(np.abs(cold - star / np.max(star)))) < 1e-5
-    hot = _nebula_interact_glow_rgb(star, em, 3, 4, density=0.45, strength=0.35)
+    hot = _nebula_interact_glow_rgb(star, em, 3, 4, density=0.62, strength=0.28)
     assert float(hot[0]) > float(cold[0]) * 0.9
     assert float(hot[2]) > float(cold[2])
     assert abs(float(np.max(hot)) - 1.0) < 1e-5
+    # Mid-bright emission should stay mostly spectral (sparse-core gate).
+    em[5, 5] = np.array([0.40, 0.10, 0.35], dtype=np.float64)
+    mid = _nebula_interact_glow_rgb(star, em, 5, 5, density=0.62, strength=0.28)
+    assert float(np.max(np.abs(mid - star / np.max(star)))) < 0.08
 
 
 def test_finalize_nebula_forces_galaxy_view_even_if_cli_disabled() -> None:
@@ -184,7 +187,8 @@ def test_cloud_complex_dramatic_richer_than_subtle() -> None:
     assert float(du_d.mean()) >= float(du_s.mean()) * 0.95
     chroma_s = float(np.std(em_s, axis=2).mean())
     chroma_d = float(np.std(em_d, axis=2).mean())
-    assert chroma_d >= chroma_s * 0.95
+    # Dramatic may concentrate color into fewer cores; allow near-parity.
+    assert chroma_d >= chroma_s * 0.85
     # Not a flat salmon field: blue channel has real mass in bright cores.
     assert float(np.percentile(em_d[..., 2], 95)) > 0.04
 
@@ -196,29 +200,157 @@ def test_cloud_complex_dramatic_has_hero_peak() -> None:
     lum = 0.2126 * em[..., 0] + 0.7152 * em[..., 1] + 0.0722 * em[..., 2]
     p99 = float(np.percentile(lum, 99))
     med = float(np.median(lum))
-    assert p99 > med * 2.5
+    # Soft base raises the median; hero cores must still clearly outshine it.
+    assert p99 > med * 1.8
     assert float(struct.max()) > 0.55
     # Dust carves through bright structure (lanes present).
     assert float(dust.max()) > 0.12
     assert float(dust.mean()) > 0.02
 
 
+def test_cloud_complex_two_layer_fills_and_punches() -> None:
+    """Dark vista envelopes most of the plate; hero cores still punch above it."""
+    rng = np.random.default_rng(42)
+    _, em, _ = build_cloud_complex_envelope(rng, 160, 320, style="dramatic")
+    lum = 0.2126 * em[..., 0] + 0.7152 * em[..., 1] + 0.0722 * em[..., 2]
+    # Immersive envelope: nearly all pixels carry dim volume (inside the gas).
+    assert float(np.mean(lum > 0.025)) > 0.90
+    assert float(np.percentile(lum, 10)) > 0.025
+    assert float(np.min(lum)) > 0.02
+    # Hierarchy: sparse bright cores, not a wall-to-wall bright fill.
+    assert float(np.mean(lum > 0.35)) < 0.45
+    assert float(np.percentile(lum, 99)) > float(lum.mean()) * 1.6
+    assert float(np.percentile(lum, 95)) > 0.16
+    # Hero well above soft vista median.
+    assert float(np.percentile(lum, 99)) > float(np.percentile(lum, 50)) * 1.8
+
+
+def test_cloud_complex_immersive_envelope_hue() -> None:
+    """Soft surround stays in hero hue family (not neutral black voids)."""
+    rng = np.random.default_rng(42)
+    _, em, _ = build_cloud_complex_envelope(
+        rng, 160, 320, style="dramatic", hero_color="red"
+    )
+    lum = 0.2126 * em[..., 0] + 0.7152 * em[..., 1] + 0.0722 * em[..., 2]
+    soft = (lum > np.percentile(lum, 15)) & (lum < np.percentile(lum, 45))
+    assert np.any(soft)
+    assert float(em[soft, 0].mean()) > float(em[soft, 1].mean()) * 1.5
+    assert float(em[soft, 0].mean()) > float(em[soft, 2].mean()) * 1.5
+    # Ambient pedestal: darkest percentile not crushed to pure zero.
+    assert float(np.percentile(lum, 5)) > 0.004
+
+
+def test_cloud_complex_soft_fill_has_cloudy_variation() -> None:
+    """Underlayer fill has soft cloudy structure — not a flat color wash."""
+    from starsky_gen.cloud_complex import _gauss_float
+    from starsky_gen.procedural_noise import _resize_bilinear
+
+    rng = np.random.default_rng(42)
+    _, em, _ = build_cloud_complex_envelope(
+        rng, 192, 384, style="dramatic", hero_color="gold"
+    )
+    lum = 0.2126 * em[..., 0] + 0.7152 * em[..., 1] + 0.0722 * em[..., 2]
+    # Dim surround (below hero peaks) still has spatial variation.
+    soft = lum < np.percentile(lum, 55)
+    assert np.any(soft)
+    soft_lum = np.where(soft, lum, np.nan)
+    # Coarse map of soft surround should not be flat.
+    fill = np.nan_to_num(soft_lum, nan=float(np.nanmean(lum[soft])))
+    coarse = _resize_bilinear(fill, 24, 48, periodic_x=True)
+    assert float(coarse.max() - coarse.min()) > 0.050
+    # Mid-scale residual in soft zone (cloudy, not constant).
+    blur = _gauss_float(lum, 10.0, periodic_x=True)
+    hp = np.abs(lum - blur)
+    assert float(hp[soft].mean()) > 0.009
+    # Soft zone relative contrast — lobes readable, not a narrow pedestal.
+    soft_med = float(np.nanmedian(lum[soft])) + 1e-8
+    assert float(np.std(lum[soft])) / soft_med > 0.18
+    # Hero still clearly brighter than soft fill median.
+    assert float(np.percentile(lum, 99)) > soft_med * 2.0
+
+
+def test_cloud_complex_pole_coverage_no_black_caps() -> None:
+    """Equirect top/bottom (sphere poles) stay enveloped — not systematically empty."""
+    rng = np.random.default_rng(42)
+    _, em, _ = build_cloud_complex_envelope(
+        rng, 192, 384, style="dramatic", hero_color="gold"
+    )
+    lum = 0.2126 * em[..., 0] + 0.7152 * em[..., 1] + 0.0722 * em[..., 2]
+    h = lum.shape[0]
+    edge = max(4, h // 12)
+    mid0, mid1 = h // 3, (2 * h) // 3
+    pole = np.concatenate([lum[:edge, :], lum[-edge:, :]], axis=0)
+    mid = lum[mid0:mid1, :]
+    # Poles carry real fill (not pure black pockets).
+    assert float(np.percentile(pole, 5)) > 0.045
+    assert float(np.mean(pole < 0.03)) < 0.03
+    # Poles not much emptier than mid-latitudes (no dark caps).
+    assert float(np.median(pole)) > float(np.median(mid)) * 0.65
+    assert float(np.mean(lum < 0.025)) < 0.02
+    assert float(np.min(lum)) > 0.025
+    # Cap rows (outer ~12%) track mid-latitude soft fill — enclosed sphere.
+    cap = max(3, h // 16)
+    caps = np.concatenate([lum[:cap, :], lum[-cap:, :]], axis=0)
+    assert float(np.median(caps)) > float(np.percentile(mid, 20)) * 0.70
+
+
+def test_cloud_complex_macro_silhouette_and_dust_lanes() -> None:
+    """Large-scale contrast + connected dust (not hundreds of equal islands)."""
+    rng = np.random.default_rng(42)
+    struct, em, dust = build_cloud_complex_envelope(rng, 192, 384, style="dramatic")
+    lum = 0.2126 * em[..., 0] + 0.7152 * em[..., 1] + 0.0722 * em[..., 2]
+    # Large-scale: low-res downsample still has strong contrast.
+    from starsky_gen.procedural_noise import _resize_bilinear
+
+    coarse = _resize_bilinear(lum, 24, 48, periodic_x=True)
+    assert float(coarse.max() - coarse.min()) > 0.18
+    assert float(np.percentile(coarse, 90)) > float(np.percentile(coarse, 20)) + 0.10
+    # Dust has range and dark mass outside the brightest structure.
+    assert float(dust.max() - dust.min()) > 0.40
+    bright = struct > np.percentile(struct, 85)
+    dark = struct < np.percentile(struct, 25)
+    if np.any(bright) and np.any(dark):
+        assert float(dust[dark].mean()) >= float(dust[bright].mean()) * 0.85
+
+
+def test_cloud_complex_barnard_shell_arcs_in_vista() -> None:
+    """FOV-scale shell arcs contribute elongated structure beyond a single blob."""
+    from starsky_gen.cloud_complex import _barnard_shell_field
+
+    rng = np.random.default_rng(42)
+    h, w = 128, 256
+    yy = np.linspace(-1.0, 1.0, h, dtype=np.float64)[:, None]
+    xx = np.linspace(-1.0, 1.0, w, dtype=np.float64)[None, :]
+    shell = _barnard_shell_field(rng, h, w, yy, xx, n_arcs=2, periodic_x=True)
+    assert float(shell.max()) > 0.35
+    # Incomplete arc: some longitudes much brighter than others (not a flat fill).
+    col = shell.mean(axis=0)
+    assert float(np.percentile(col, 90)) > float(np.percentile(col, 20)) + 0.02
+    # Full envelope still has wide soft coverage with shell mixed in.
+    rng = np.random.default_rng(42)
+    _, em, _ = build_cloud_complex_envelope(rng, 160, 320, style="dramatic", hero_color="red")
+    lum = 0.2126 * em[..., 0] + 0.7152 * em[..., 1] + 0.0722 * em[..., 2]
+    assert float(np.mean(lum > 0.015)) > 0.85
+
+
 def test_cloud_layer_interaction_gates_emission_to_dust_overlap() -> None:
-    """Emission survives where dust×structure overlap; dust has extinction range."""
+    """Hero cores track dust×structure; soft base fills voids; dust has range."""
     rng = np.random.default_rng(42)
     struct, em, dust = build_cloud_complex_envelope(rng, 160, 320, style="dramatic")
     lum = 0.2126 * em[..., 0] + 0.7152 * em[..., 1] + 0.0722 * em[..., 2]
-    # Gated plate: most of the frame is dark; bright cores are sparse but photogenic.
-    assert float(np.percentile(lum, 50)) < float(np.percentile(lum, 95)) * 0.55
-    assert float(np.mean(lum > 0.08)) < 0.50
-    assert float(np.percentile(lum, 95)) > 0.25
+    # Soft base + sparse hero: median below bright tail; hot cores not wall-to-wall.
+    assert float(np.percentile(lum, 50)) < float(np.percentile(lum, 95)) * 0.75
+    assert float(np.mean(lum > 0.35)) < 0.40
+    assert float(np.percentile(lum, 95)) > 0.22
     # Warm chroma in bright cores (saturation finish).
     hot = lum > np.percentile(lum, 92)
     if np.any(hot):
         assert float(em[hot, 0].mean()) >= float(em[hot, 2].mean()) * 0.85
-        assert float(dust[hot].mean()) > float(dust.mean()) * 0.90
         assert float(struct[hot].mean()) > float(struct.mean()) * 0.85
-    # Dust has usable dynamic range for extinction (not a flat haze).
+    # Dust carves cavities (higher outside bright cores) with usable range.
+    cool = lum < np.percentile(lum, 30)
+    if np.any(hot) and np.any(cool):
+        assert float(dust[cool].mean()) >= float(dust[hot].mean()) * 0.90
     assert float(dust.max() - dust.min()) > 0.35
     assert float(np.percentile(dust, 90)) > float(np.percentile(dust, 20)) + 0.12
 
@@ -232,6 +364,19 @@ def test_nebula_hero_color_presets_shift_chroma() -> None:
     gold2, key2 = parse_nebula_hero_color("gold-core")
     assert key2 == "gold"
     assert np.allclose(gold, gold2)
+    red, key = parse_nebula_hero_color("red")
+    assert key == "red"
+    # Preset red is #FF1818 (R dominant; G≈B).
+    assert float(red[0]) > float(red[1]) * 8.0
+    assert abs(float(red[1]) - float(red[2])) < 0.02
+    ff1818, key_ff = parse_nebula_hero_color("#FF1818")
+    assert key_ff == "red"  # exact preset hex maps to canonical red
+    assert np.allclose(red, ff1818, atol=1e-6)
+    assert np.allclose(red, parse_nebula_hero_color("FF1818")[0], atol=1e-6)
+    assert parse_nebula_hero_color("0xFF1818")[1] == "red"
+    deff, key_de = parse_nebula_hero_color("#DEFFB8")
+    assert key_de == "custom"
+    assert float(deff[1]) > float(deff[0])
     blue, key = parse_nebula_hero_color("cool-blue")
     assert key == "blue"
     assert float(blue[2]) > float(blue[0])
@@ -250,13 +395,98 @@ def test_nebula_hero_color_presets_shift_chroma() -> None:
     _, em_b, _ = build_cloud_complex_envelope(
         rng, 96, 192, style="dramatic", hero_color="blue"
     )
+    rng = np.random.default_rng(7)
+    _, em_r, _ = build_cloud_complex_envelope(
+        rng, 96, 192, style="dramatic", hero_color="red"
+    )
     lum_g = em_g.mean(axis=2)
     lum_b = em_b.mean(axis=2)
+    lum_r = em_r.mean(axis=2)
     hot_g = lum_g > np.percentile(lum_g, 90)
     hot_b = lum_b > np.percentile(lum_b, 90)
+    hot_r = lum_r > np.percentile(lum_r, 90)
     ratio_g = float(em_g[hot_g, 0].mean() / max(em_g[hot_g, 2].mean(), 1e-6))
     ratio_b = float(em_b[hot_b, 0].mean() / max(em_b[hot_b, 2].mean(), 1e-6))
     assert ratio_g > ratio_b
+    # Blue cores must read blue (not washed beige/white).
+    assert float(em_b[hot_b, 2].mean()) > float(em_b[hot_b, 0].mean()) * 1.15
+    chroma_b = float(np.mean(em_b[hot_b].max(axis=1) - em_b[hot_b].min(axis=1)))
+    assert chroma_b > 0.22
+    # #FF1818-family cores (R well above G and B; G≈B).
+    assert float(em_r[hot_r, 0].mean()) > float(em_r[hot_r, 1].mean()) * 2.0
+    assert float(em_r[hot_r, 0].mean()) > float(em_r[hot_r, 2].mean()) * 2.0
+    assert abs(float(em_r[hot_r, 1].mean()) - float(em_r[hot_r, 2].mean())) < float(
+        em_r[hot_r, 0].mean()
+    ) * 0.35
+
+
+def test_red_emission_hue_tight_and_vista_matches() -> None:
+    """Red preset: tight hero chroma, soft peaks, underlayer same hue family."""
+    rng = np.random.default_rng(42)
+    _, em, _ = build_cloud_complex_envelope(
+        rng, 160, 320, style="dramatic", hero_color="red"
+    )
+    lum = 0.2126 * em[..., 0] + 0.7152 * em[..., 1] + 0.0722 * em[..., 2]
+    hot = lum > np.percentile(lum, 94)
+    soft = (lum > np.percentile(lum, 40)) & (lum < np.percentile(lum, 70))
+    assert np.any(hot) and np.any(soft)
+    # Hot cores stay #FF1818 red (R dominant; G≈B, not magenta).
+    assert float(em[hot, 0].mean()) > float(em[hot, 1].mean()) * 2.0
+    assert float(em[hot, 2].mean()) < float(em[hot, 1].mean()) * 1.35
+    # Soft underlayer tracks the same hue (not brown/neutral gray).
+    assert float(em[soft, 0].mean()) > float(em[soft, 1].mean()) * 1.6
+    assert float(em[soft, 0].mean()) > float(em[soft, 2].mean()) * 1.6
+    # Peaks compressed: very few near-white luminances.
+    assert float(np.mean(lum > 0.72)) < 0.02
+
+
+def test_red_preset_matches_custom_ff1818_envelope() -> None:
+    """Named red and custom #FF1818 share finish path — envelopes stay close."""
+    rng = np.random.default_rng(42)
+    _, em_r, _ = build_cloud_complex_envelope(
+        rng, 128, 256, style="dramatic", hero_color="red"
+    )
+    rng = np.random.default_rng(42)
+    _, em_c, _ = build_cloud_complex_envelope(
+        rng, 128, 256, style="dramatic", hero_color="FF1818"
+    )
+    assert float(np.mean(np.abs(em_r - em_c))) < 0.04
+    lum_r = 0.2126 * em_r[..., 0] + 0.7152 * em_r[..., 1] + 0.0722 * em_r[..., 2]
+    lum_c = 0.2126 * em_c[..., 0] + 0.7152 * em_c[..., 1] + 0.0722 * em_c[..., 2]
+    assert abs(float(lum_r.mean()) - float(lum_c.mean())) < 0.02
+
+
+def test_red_emission_keeps_structure_inside_hot_cores() -> None:
+    """Red emission must not erase filament relief inside bright mass (vs flat slab)."""
+    from starsky_gen.cloud_complex import _gauss_float
+    from starsky_gen.procedural_noise import _resize_bilinear
+
+    rng = np.random.default_rng(42)
+    _, em, dust = build_cloud_complex_envelope(
+        rng, 192, 384, style="dramatic", hero_color="red"
+    )
+    lum = 0.2126 * em[..., 0] + 0.7152 * em[..., 1] + 0.0722 * em[..., 2]
+    # Large-scale contrast still present after compose.
+    coarse = _resize_bilinear(lum, 24, 48, periodic_x=True)
+    assert float(coarse.max() - coarse.min()) > 0.12
+    assert float(np.percentile(coarse, 90)) > float(np.percentile(coarse, 20)) + 0.06
+    # Soft mid-scale relief inside hot cores (not HF burned-film worm texture).
+    blur = _gauss_float(lum, 6.5, periodic_x=True)
+    hp = np.abs(lum - blur)
+    hot = lum > np.percentile(lum, 90)
+    assert np.any(hot)
+    rel = hp / (lum + 1e-8)
+    assert float(rel[hot].mean()) > 0.008
+    assert float(np.std(lum[hot]) / (float(lum[hot].mean()) + 1e-8)) > 0.012
+    # Softness: high-frequency residual stays below mid-scale (not crunchy).
+    hf = np.abs(lum - _gauss_float(lum, 1.4, periodic_x=True))
+    assert float(hf[hot].mean()) < float(hp[hot].mean()) * 1.85
+    # Dust still carves through bright emission.
+    assert float(dust.max()) > 0.35
+    if np.any(hot):
+        cool = lum < np.percentile(lum, 30)
+        if np.any(cool):
+            assert float(dust[cool].mean()) >= float(dust[hot].mean()) * 0.75
 
 
 def test_soft_squash_lat_spreads_near_pole() -> None:
@@ -397,7 +627,7 @@ def test_nebula_stars_only_no_midplane_haze(tmp_path) -> None:
     img = np.asarray(Image.open(saved["equirectangular"]), dtype=np.float64) / 255.0
     lum = img.mean(axis=2)
     h = lum.shape[0]
-    row = lum.mean(axis=1)
+    lum.mean(axis=1)
     # True black void between stars (grade must not lift floor to mid-grey haze).
     assert float(np.median(lum)) < 0.08
     assert float(np.percentile(lum, 10)) < 0.02

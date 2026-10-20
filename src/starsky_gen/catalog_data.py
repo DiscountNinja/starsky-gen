@@ -72,7 +72,7 @@ def fit_procedural_stats_from_catalog(
     if mags is None or mags.size < 8:
         return 0.6, 0.65
     hist, edges = np.histogram(mags, bins=12)
-    centers = 0.5 * (edges[1:] + edges[:-1])
+    0.5 * (edges[1:] + edges[:-1])
     valid = hist > 0
     if valid.sum() < 3:
         return 0.6, 0.65

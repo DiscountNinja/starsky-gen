@@ -1421,7 +1421,7 @@ def build_band_hii_patches(
     yy = np.linspace(-1.0, 1.0, h, dtype=np.float64)[:, None]
     xx = np.linspace(-1.0, 1.0, w, dtype=np.float64)[None, :]
     scale = float(max(h, w))
-    mega_sig = float(np.clip(scale * 0.08, 14.0, 100.0))
+    float(np.clip(scale * 0.08, 14.0, 100.0))
     regional = build_hii_emission_hierarchy(
         np.clip(score * host, 0.0, 1.0),
         derive_nebula_rng(hii_seed, "band_hii_field"),
@@ -1498,7 +1498,7 @@ def build_scene_red_hii_spots(
     yy = np.linspace(-1.0, 1.0, h, dtype=np.float64)[:, None]
     xx = np.linspace(-1.0, 1.0, w, dtype=np.float64)[None, :]
     scale = float(max(h, w))
-    mega_sig = float(np.clip(scale * 0.09, 16.0, 120.0))
+    float(np.clip(scale * 0.09, 16.0, 120.0))
     layer = np.zeros((h, w, 3), dtype=np.float64)
     flat = score.ravel()
     for i in range(n):

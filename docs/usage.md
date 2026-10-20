@@ -86,6 +86,11 @@ starsky-gen \
   --output-base-name skybox
 ```
 
+Seeds with `--generations N`:
+
+- `--seed 42 --generations 40` → seeds `42` … `81` (start + N−1)
+- omit `--seed` → a unique random seed for each generation (no repeats in the batch)
+
 Recommended sizes:
 
 - Equirectangular skybox: `4096x2048`
@@ -134,7 +139,7 @@ Cinematic prioritizes **volumetric glow + color hierarchy**. BandPlan still driv
 - `--nebula` / `--no-nebula` — gas; when off, guided skips nebula-mode/style/dust prompts
 - `--background-density` — off-plane/cosmic/halo **star** density `[0–2]` (0 = none); blank = look default
 - `--cloud-continuity` `[0–1.6]`, `--dust-coverage` `[0–1.6]`, `--dust-strength` `[0–1.8]` (0 = off/none)
-- `--nebula-hero-color` — hero nebula tint (`--mode nebula`): `classic-red`/`red`, `gold-core`/`gold`, `cool-blue`/`blue`, `magenta-accent`/`magenta`, `neutral`; or hex with/without `#` (`FC5656` or `#FC5656`) / `R,G,B`. In bash, use `FC5656` unquoted or quote `'#FC5656'` (`#` starts a comment).
+- `--nebula-hero-color` — hero nebula tint (`--mode nebula`): `classic-red`/`red` (`#FF1818`), `gold-core`/`gold`, `cool-blue`/`blue`, `magenta-accent`/`magenta`, `neutral`; or hex (`FF1818`, `0xFF1818`, `'#FF1818'`) / `R,G,B`. In bash, never pass a bare `#…` — the shell treats `#` as a comment (use `FF1818` or quote `'#FF1818'`).
 - `--depth` / `--no-depth` — dim catalog stars toward poles (not camera DOF)
 - `--render-profile` — `physical` = linear only; `physical_grade` = +grade; `full` = +display finish/grain
 - `--isolate-layer` — final plate on black: `none` | `background_stars` | `heroes` | `nebula_gas`

@@ -1022,7 +1022,7 @@ def generate_nebula(
             * (0.26 + 0.74 * np.clip(clumps, 0.0, 1.0))
         )
         gold_mid = gold_blob[..., None] * np.array([0.72, 0.62, 0.38], dtype=np.float64) * 0.085
-        mag_mid = mag_blob[..., None] * np.array([0.42, 0.08, 0.30], dtype=np.float64) * 0.048
+        mag_blob[..., None] * np.array([0.42, 0.08, 0.30], dtype=np.float64) * 0.048
         color = np.clip(color + gold_mid, 0.0, 1.0)
         # Split veils so warm dust (gold) and H II (pink–magenta) stay separate spectrally.
         veil_gold = _blur_separable_xy(
@@ -1040,7 +1040,7 @@ def generate_nebula(
         veil_hi_h = np.clip(veil_hii - _blur_separable_xy(veil_hii, passes=2, periodic_x=wrap_x), 0.0, 1.0)
         veil_hii = np.clip(veil_hii * 0.65 + veil_hi_h * 0.45, 0.0, 1.0)
         vg_add = veil_gold[..., None] * np.array([0.55, 0.50, 0.40], dtype=np.float64) * 0.038
-        vh_add = veil_hii[..., None] * np.array([0.38, 0.10, 0.30], dtype=np.float64) * 0.017
+        veil_hii[..., None] * np.array([0.38, 0.10, 0.30], dtype=np.float64) * 0.017
         color = np.clip(color + vg_add, 0.0, 1.0)
 
         # Light merge on line emission only (preserve compact H II structure).

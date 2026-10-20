@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 import numpy as np
 
@@ -10,18 +10,15 @@ from starsky_gen.galactic_structure import GalacticMorphology
 GalacticStructure = GalacticMorphology
 
 from starsky_gen.color_science import (
-    sample_teffective_array,
     sample_teffective_for_placement,
-    star_rgb_from_teffective,
     teff_to_bv,
 )
-from starsky_gen.photometry import sample_apparent_magnitudes_imf, sample_apparent_magnitudes_lf
+from starsky_gen.photometry import sample_apparent_magnitudes_lf
 from starsky_gen.placement import (
     EQUIRECT_LAT_POLE_MARGIN_FULL_SKY,
     EQUIRECT_POLE_TAPER_FRAC,
     equirect_pole_edge_margin,
     lat_equirect_clip_bounds,
-    sample_galactic_disk_lon_lat_v2,
     sample_hierarchical_poisson_field,
     sample_smooth_poisson_field,
     soft_squash_lat,

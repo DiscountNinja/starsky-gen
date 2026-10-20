@@ -3,7 +3,7 @@
 import numpy as np
 
 from starsky_gen.dither import apply_blue_noise_dither_u8, blue_noise_tile
-from starsky_gen.placement import _poisson_disk_on_grid, pixels_to_lon_lat
+from starsky_gen.placement import _poisson_disk_on_grid
 from starsky_gen.procedural_noise import build_galaxy_streak_noise_stack
 
 

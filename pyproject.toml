@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "starsky-gen"
-version = "0.1.0"
+version = "1.0.0"
 description = "Cinematic AAA skybox and starfield generator for games"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -25,6 +25,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0.0",
+  "ruff>=0.8.0",
 ]
 
 [project.scripts]
@@ -33,3 +34,12 @@ starsky-gen = "starsky_gen.cli:app"
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# Keep the CI gate focused; expand gradually. Format is not gated yet.
+select = ["F"]

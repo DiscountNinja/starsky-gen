@@ -1876,6 +1876,8 @@ def apply_scene_mode_preset(cfg: RenderConfig) -> RenderConfig:
         "use_spectral_teffective": True,
         # Grade / photoreal path still needs galaxy_view; MW band gated by use_mw_band().
         "galaxy_view": True,
+        # Stars after nebula grade so heroes can sit on top of remasked gas.
+        "split_star_display_grade": True,
     }
     if f.nebula and not look_le:
         update.update(
@@ -1887,11 +1889,11 @@ def apply_scene_mode_preset(cfg: RenderConfig) -> RenderConfig:
                 "unresolved_gas_occlusion": min(f.unresolved_gas_occlusion, 0.28),
             }
         )
-    # Epic nebula vista: stronger Interactive Layer (glow × emission).
+    # Epic nebula vista: Interactive Layer only in sparse dense cores (not wall-to-wall).
     if abs(float(f.nebula_interact_density) - 0.55) < 1e-6:
-        update["nebula_interact_density"] = 0.45
+        update["nebula_interact_density"] = 0.62
     if abs(float(f.nebula_interact_strength) - 0.18) < 1e-6:
-        update["nebula_interact_strength"] = 0.35
+        update["nebula_interact_strength"] = 0.28
     if f.stars or f.hero_star_enabled:
         if look_le:
             # Keep sharp-core / no-spoke recipe from look preset.

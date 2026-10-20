@@ -166,6 +166,8 @@ Layer folder includes `density_G.png`, `dust_D.png`, `unresolved_U.png`, `resolv
 
 Advanced morphology tuning (extinction void floor, off-band red strength, ISM dominance, obliteration, etc.) lives in `FeatureConfig` (`src/starsky_gen/config.py`) and is not exposed as CLI flags yet.
 
+Package helpers `starsky_gen.debug_trace` and `starsky_gen.vista_metrics` are diagnostic APIs for structure/vista checks (used by tests and ad-hoc scripts). They are not part of the normal `starsky-gen` generate CLI.
+
 ### `assist` command
 
 ```bash

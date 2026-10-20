@@ -31,7 +31,6 @@ from starsky_gen.galactic_structure import (
     build_galactic_morphology,
     deposit_catalog_unresolved_flux,
     morphology_grayscale_preview,
-    resolved_keep_probability,
 )
 from starsky_gen.generator import render_single
 from starsky_gen.psf import flux_from_mag, sample_psf_fwhm_scale

@@ -6,7 +6,6 @@ import math
 
 import numpy as np
 
-from starsky_gen.projections import sph_to_equirect_xy
 
 # Keep sampled |lat| inside this margin of ±π/2 so stars do not pile on equirect rows y≈0/h-1.
 # Full-sky nebula vistas use the softer margin to avoid empty polar bands / razor edges.

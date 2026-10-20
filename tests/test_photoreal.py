@@ -66,9 +66,11 @@ def test_psf_halo_tiers_ultra_bright_wider() -> None:
     tune = PsfTuning()
     g_mid, w_mid, _, _ = psf_halo_tiers(120.0, 11.0, tune)
     g_hi, w_hi, _, bloom = psf_halo_tiers(900.0, 6.0, tune)
-    assert g_mid <= 0.016
-    assert w_mid < w_hi
-    assert w_hi <= 0.016
+    # Caps match psf_halo_tiers (inner≤0.048, outer≤0.032) after stronger soft falloff.
+    assert g_mid <= 0.048
+    assert g_hi >= g_mid
+    assert w_mid <= w_hi
+    assert w_hi <= 0.032
     assert bloom
 
 

@@ -11,11 +11,9 @@ from starsky_gen.structure_envelope import (
     build_disk_mesoscale_thickness_field,
     build_hii_emission_hierarchy,
     build_emission_morphology_field,
-    build_gold_population_field,
     build_ism_scale_hierarchy,
     build_longitude_asymmetry,
     build_morphology_ism_rgb,
-    build_vertical_structure_envelope,
     latitude_plane_gate,
     reinject_cloud_microstructure,
     reinject_vertical_dust_structure,
@@ -95,7 +93,7 @@ def test_asymmetric_band_bleed_breaks_parallel_rim() -> None:
     dw = np.exp(-((yy**2) / 0.10))
     rng = np.random.default_rng(11)
     env = build_asymmetric_band_bleed_envelope(dw, h, w, rng, bleed_strength=0.85)
-    gy = np.gradient(env, axis=0)
+    np.gradient(env, axis=0)
     rim = (dw[:, 0] > 0.25) & (dw[:, 0] < 0.72)
     assert float(np.std(env[rim, :])) > 0.028
     assert float(np.max(env) - float(np.min(env[rim, :]))) > 0.115

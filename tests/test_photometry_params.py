@@ -4,24 +4,34 @@ import numpy as np
 
 from starsky_gen.composite_blend import auto_star_display_stretch_gain, recompute_hdr_asinh_gain
 from starsky_gen.nebula_physics import extinction_av_scale_for_lane_depth
-from starsky_gen.psf import PsfTuning, moffat_fwhm_px, moffat_params_from_mag_and_flux, moffat_sigma_from_fwhm
+from starsky_gen.psf import PsfTuning, moffat_fwhm_px, moffat_params_from_mag_and_flux
 from starsky_gen.tone_map import asinh_linear_stretch_luma
 
 
 def test_moffat_fwhm_mag_law() -> None:
-    tune = PsfTuning(fwhm_base_px=2.0, fwhm_ref_mag=8.0, fwhm_mag_coeff=0.2)
+    # Isolate the mag_nudge term: fwhm ~= base * (1 + coeff * max(0, ref-mag) * 0.35).
+    tune = PsfTuning(
+        fwhm_base_px=2.0,
+        fwhm_ref_mag=8.0,
+        fwhm_mag_coeff=0.2,
+        fwhm_bright_jitter_sigma=0.0,
+        fwhm_faint_jitter_half=0.0,
+        faint_core_sigma_scale=1.0,
+        tier_background_sigma_scale=1.0,
+        mag_radius_gamma=0.0,
+    )
     rng = np.random.default_rng(0)
     p_b, _, _, _ = moffat_params_from_mag_and_flux(
-        6.0, flux=100.0, galactic_lat_rad=0.0, rng=rng, tuning=tune
+        6.0, flux=100.0, galactic_lat_rad=0.0, rng=rng, tuning=tune, fwhm_scale=1.0
     )
     p_f, _, _, _ = moffat_params_from_mag_and_flux(
-        14.0, flux=1.0, galactic_lat_rad=0.0, rng=rng, tuning=tune
+        14.0, flux=1.0, galactic_lat_rad=0.0, rng=rng, tuning=tune, fwhm_scale=1.0
     )
     fwhm_b = moffat_fwhm_px(p_b["sigma_x"], p_b["beta"])
     fwhm_f = moffat_fwhm_px(p_f["sigma_x"], p_f["beta"])
     assert fwhm_b > fwhm_f
-    expect_b = 2.0 * (1.0 + 0.2 * 2.0)
-    assert abs(fwhm_b - expect_b) < 1.05
+    expect_b = 2.0 * (1.0 + 0.2 * 2.0 * 0.35)
+    assert abs(fwhm_b - expect_b) < 0.35
 
 
 def test_asinh_linear_gain_q() -> None:

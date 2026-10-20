@@ -3,9 +3,7 @@
 import numpy as np
 
 from starsky_gen.galactic_structure import (
-    GalacticStructure,
     apply_unresolved_field_to_canvas,
-    attach_dust_visibility_to_catalog,
     build_galactic_structure,
     resolved_keep_probability,
     sample_foreground_lon_lat_from_structure,

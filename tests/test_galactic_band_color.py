@@ -53,7 +53,7 @@ def test_band_grade_darkens_extinction_lanes() -> None:
         rng=np.random.default_rng(2),
     )
     lane = (disk > 0.3) & (ext < 0.15)
-    clear = (disk > 0.3) & (ext > 0.5)
+    (disk > 0.3) & (ext > 0.5)
     assert float(rec709_luma(out[lane]).mean()) < float(rec709_luma(canvas[lane]).mean()) * 0.82
     assert float(np.mean(out[lane, 2])) < float(np.mean(out[lane, 0])) * 0.85
 

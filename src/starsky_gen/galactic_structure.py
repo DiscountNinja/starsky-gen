@@ -23,7 +23,6 @@ from starsky_gen.dust_field import (
     build_band_disruption_field,
     build_filament_erosion_map,
     carve_dust_transmission_microstructure,
-    enrich_dust_absorption_microstructure,
     transmission_from_absorption_map,
 )
 from starsky_gen.placement import (
@@ -1520,7 +1519,7 @@ def apply_unresolved_field_to_canvas(
     inherit_rate = structure.unresolved_speckle_rate() * area_w
     parent_seed = int(rng.integers(0, 2**31))
 
-    from starsky_gen.structure_envelope import diffuse_scale_hierarchy, latitude_plane_gate
+    from starsky_gen.structure_envelope import latitude_plane_gate
 
     plane_gate = latitude_plane_gate(h, sigma=0.42, power=1.10)
     morph_speckle_gate = latitude_plane_gate(h, sigma=0.58, power=0.94)

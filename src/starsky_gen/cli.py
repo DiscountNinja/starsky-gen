@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal  # noqa: F401 — needed for Annotated eval of NebulaStyleOpt etc.
 
 import numpy as np
 import typer
@@ -16,6 +16,50 @@ from starsky_gen.cli_defaults import (
     project_defaults_for_display,
     provided_params_from_ctx,
     updates_from_kwargs,
+)
+from starsky_gen.cli_options import (
+    BackgroundDensityOpt,
+    BackgroundGradientOpt,
+    BackgroundTextureStrengthOpt,
+    BlackBackgroundOpt,
+    CloudContinuityOpt,
+    CubeOpt,
+    CubemapFaceSizeOpt,
+    DebugExportLayersOpt,
+    DebugGrayscaleMorphologyOpt,
+    DepthOpt,
+    DustCoverageOpt,
+    DustStrengthOpt,
+    GalaxyViewOpt,
+    GenerationsOpt,
+    GuidedOpt,
+    HeightOpt,
+    IsolateLayerOpt,
+    JpegArtifactPassOpt,
+    LongExposureLookOpt,
+    LookTargetOpt,
+    MorphologyScarStrengthOpt,
+    MorphologyVoidStrengthOpt,
+    NebulaDebugPassOpt,
+    NebulaHeroColorOpt,
+    NebulaInteractDensityOpt,
+    NebulaInteractStrengthOpt,
+    NebulaModeOpt,
+    NebulaOpt,
+    NebulaStyleOpt,
+    NoheroesOpt,
+    OutputBaseNameOpt,
+    OutputDirOpt,
+    OutputFormatOpt,
+    ProjectionModeOpt,
+    QualityOpt,
+    RenderProfileOpt,
+    SaveAsDefaultOpt,
+    SceneModeOpt,
+    SeedOpt,
+    ShowDefaultsOpt,
+    StarsOpt,
+    WidthOpt,
 )
 from starsky_gen.config import (
     FeatureConfig,
@@ -70,18 +114,6 @@ def _print_show_defaults(*, license_file: Path | None = None) -> None:
     project = project_defaults_for_display()
     for key in sorted(project):
         console.print(f"  {key}: {format_defaults_value_markup(project[key])}")
-
-
-def _validate_nebula_hero_color(ctx: typer.Context, param: typer.CallbackParam, value: str) -> str:
-    from starsky_gen.cloud_complex import parse_nebula_hero_color
-
-    _ = ctx, param
-    try:
-        parse_nebula_hero_color(value)
-    except ValueError as exc:
-        raise typer.BadParameter(str(exc)) from exc
-    return value
-
 
 
 
@@ -143,186 +175,48 @@ def _feature_config_from_cli(
 @app.callback(invoke_without_command=True)
 def _default_to_generate(
     ctx: typer.Context,
-    width: int = typer.Option(2048, help="Output width for equirectangular renders."),
-    height: int = typer.Option(1024, help="Output height for equirectangular renders."),
-    output_base_name: str = typer.Option("starsky", help="Base filename prefix."),
-    output_dir: Path = typer.Option(
-        Path("output"),
-        "--output-dir",
-        "-o",
-        help="Directory for generated images.",
-    ),
-    generations: int = typer.Option(1, min=1, help="Number of generations to produce."),
-    seed: int | None = typer.Option(None, help="Base random seed for deterministic batches."),
-    projection_mode: ProjectionMode = typer.Option(
-        ProjectionMode.equirectangular,
-        help="Projection target: equirectangular, cubemap, or both.",
-    ),
-    cube: bool = typer.Option(
-        False,
-        "--cube",
-        "-cube",
-        help="Shortcut to include cubemap output (switches equirectangular to both).",
-    ),
-    output_format: OutputFormat = typer.Option(
-        OutputFormat.png, help="Output format (png, jpg, or webp)."
-    ),
-    scene_mode: SceneMode = typer.Option(
-        SceneMode.normal,
-        "--mode",
-        help="Scene recipe: normal=Milky Way band skybox; nebula=broad cloud-complex vista.",
-    ),
-    nebula_mode: NebulaMode = typer.Option(
-        NebulaMode.galaxy_streak,
-        help="Nebula style: distant, full, or galaxy_streak (under --mode normal).",
-    ),
-    quality: int = typer.Option(
-        100, min=50, max=100, help="JPEG/WebP quality (ignored for PNG)."
-    ),
-    cubemap_face_size: int = typer.Option(1024, min=128, max=4096, help="Face size for cubemap outputs."),
-    stars: bool = typer.Option(
-        True, help="Background star catalogs (band/mid/cosmic/halo); heroes are separate."
-    ),
-    depth: bool = typer.Option(
-        True, help="Dim catalog stars toward the poles (not camera DOF)."
-    ),
-    nebula: bool = typer.Option(True, help="Enable nebula gas rendering."),
-    galaxy_view: bool = typer.Option(
-        True,
-        help="Enable Milky Way band under --mode normal (ignored for band under --mode nebula).",
-    ),
-    background_gradient: bool = typer.Option(True, help="Add non-black galactic background gradient."),
-    black_background: bool = typer.Option(
-        False,
-        help="Force black background (overrides gradient/noise background).",
-    ),
-    jpeg_artifact_pass: bool = typer.Option(False, help="Apply JPEG artifact emulation pass."),
-    look_target: LookTarget = typer.Option(
-        LookTarget.cinematic,
-        "--look-target",
-        help=(
-            "cinematic=wrap-safe skybox; documentary=parked photo; "
-            "long_exposure=tracked deep field (sharp points, denser faint stars)."
-        ),
-    ),
-    long_exposure_look: bool = typer.Option(
-        False,
-        "--long-exposure-look/--flat-exposure",
-        help=(
-            "Advanced override for cinematic only (legacy stacked-sky theater). "
-            "Prefer --look-target long_exposure for the tracked deep-field look."
-        ),
-    ),
-    background_texture_strength: float = typer.Option(
-        1.0,
-        min=0.0,
-        max=2.0,
-        help="Unresolved-star grain [0–2]: 0=smooth, 1=default, 2=gritty.",
-    ),
-    nebula_style: Literal["subtle", "balanced", "dramatic"] = typer.Option(
-        "balanced",
-        help="Nebula preset: subtle, balanced, or dramatic.",
-    ),
-    cloud_continuity: float = typer.Option(
-        1.22,
-        min=0.0,
-        max=1.6,
-        help="Connect/thicken cloud volumes [0–1.6]; 0=off.",
-    ),
-    dust_coverage: float = typer.Option(
-        0.98,
-        min=0.0,
-        max=1.6,
-        help="Dark dust area coverage [0–1.6]; 0=none.",
-    ),
-    dust_strength: float = typer.Option(
-        1.14,
-        min=0.0,
-        max=1.8,
-        help="Dust dimming strength [0–1.8]; 0=none.",
-    ),
-
-    nebula_hero_color: str = typer.Option(
-        "magenta",
-        "--nebula-hero-color",
-        help=(
-            "Hero nebula tint: classic-red|red, gold-core|gold, cool-blue|blue, "
-            "magenta-accent|magenta, neutral; or hex (FC5656 or #FC5656) / R,G,B. "
-            "In bash prefer FC5656 unquoted, or quote '#FC5656' (# starts a comment)."
-        ),
-        callback=_validate_nebula_hero_color,
-    ),
-    nebula_interact_density: float | None = typer.Option(
-        None,
-        "--nebula-interact-density",
-        min=0.0,
-        max=1.0,
-        help="Interactive layer density gate [0–1]; higher = only bright emission. Scene default if omitted.",
-    ),
-    nebula_interact_strength: float | None = typer.Option(
-        None,
-        "--nebula-interact-strength",
-        min=0.0,
-        max=1.0,
-        help="Interactive layer strength [0–1]: star glow lean toward local emission. Scene default if omitted.",
-    ),
-    nebula_debug_pass: Literal["normal", "occluder_only", "continuum_only"] = typer.Option(
-        "normal",
-        help="Diagnostic: normal nebula, occluder-only dust RGB, or continuum-only field (galaxy_streak only).",
-    ),
-    render_profile: str = typer.Option(
-        "full",
-        help="physical=linear only; physical_grade=+grade; full=+display finish/grain.",
-    ),
-    isolate_layer: IsolateLayer = typer.Option(
-        IsolateLayer.none,
-        "--isolate-layer",
-        help="Final plate on black: none | background_stars | heroes | nebula_gas.",
-    ),
-    debug_export_layers: bool = typer.Option(
-        False, "--debug-layers", help="Write debug layer PNGs (MW morphology and/or cloud structure/emission/dust, extinction, resolved stars)."
-    ),
-    debug_grayscale_morphology: bool = typer.Option(
-        False,
-        "--grayscale-morphology",
-        help="Write grayscale morphology diagnostic PNG.",
-    ),
-    morphology_void_strength: float = typer.Option(0.72, min=0.0, max=1.0),
-    morphology_scar_strength: float = typer.Option(0.68, min=0.0, max=1.5),
-    noheroes: bool = typer.Option(
-        False,
-        "--noheroes",
-        help="Disable hero stars (spikes/ghosts); independent of --no-stars.",
-    ),
-    background_density: float | None = typer.Option(
-        None,
-        "--background-density",
-        min=0.0,
-        max=2.0,
-        help="Off-plane/cosmic/halo star density [0–2]; blank=look default (~0.30 cinematic).",
-    ),
-    save_as_default: bool = typer.Option(
-        False,
-        "--default",
-        help=(
-            "Merge explicitly passed flags into .license defaults and exit "
-            "(does not render)."
-        ),
-    ),
-    show_defaults: bool = typer.Option(
-        False,
-        "--show-defaults",
-        help="Print custom (.license) and project built-in defaults, then exit.",
-    ),
-    guided: bool = typer.Option(
-        False,
-        "--guided",
-        help=(
-            "Force interactive fine-tuning of arguments (even when other flags "
-            "are set). Bare starsky-gen with no flags already enters guided; "
-            "any other flag uses CLI args + defaults."
-        ),
-    ),
+    width: WidthOpt = 2048,
+    height: HeightOpt = 1024,
+    output_base_name: OutputBaseNameOpt = "starsky",
+    output_dir: OutputDirOpt = Path("output"),
+    generations: GenerationsOpt = 1,
+    seed: SeedOpt = None,
+    projection_mode: ProjectionModeOpt = ProjectionMode.equirectangular,
+    cube: CubeOpt = False,
+    output_format: OutputFormatOpt = OutputFormat.png,
+    scene_mode: SceneModeOpt = SceneMode.normal,
+    nebula_mode: NebulaModeOpt = NebulaMode.galaxy_streak,
+    quality: QualityOpt = 100,
+    cubemap_face_size: CubemapFaceSizeOpt = 1024,
+    stars: StarsOpt = True,
+    depth: DepthOpt = True,
+    nebula: NebulaOpt = True,
+    galaxy_view: GalaxyViewOpt = True,
+    background_gradient: BackgroundGradientOpt = True,
+    black_background: BlackBackgroundOpt = False,
+    jpeg_artifact_pass: JpegArtifactPassOpt = False,
+    look_target: LookTargetOpt = LookTarget.cinematic,
+    long_exposure_look: LongExposureLookOpt = False,
+    background_texture_strength: BackgroundTextureStrengthOpt = 1.0,
+    nebula_style: NebulaStyleOpt = "balanced",
+    cloud_continuity: CloudContinuityOpt = 1.22,
+    dust_coverage: DustCoverageOpt = 0.98,
+    dust_strength: DustStrengthOpt = 1.14,
+    nebula_hero_color: NebulaHeroColorOpt = "magenta",
+    nebula_interact_density: NebulaInteractDensityOpt = None,
+    nebula_interact_strength: NebulaInteractStrengthOpt = None,
+    nebula_debug_pass: NebulaDebugPassOpt = "normal",
+    render_profile: RenderProfileOpt = "full",
+    isolate_layer: IsolateLayerOpt = IsolateLayer.none,
+    debug_export_layers: DebugExportLayersOpt = False,
+    debug_grayscale_morphology: DebugGrayscaleMorphologyOpt = False,
+    morphology_void_strength: MorphologyVoidStrengthOpt = 0.72,
+    morphology_scar_strength: MorphologyScarStrengthOpt = 0.68,
+    noheroes: NoheroesOpt = False,
+    background_density: BackgroundDensityOpt = None,
+    save_as_default: SaveAsDefaultOpt = False,
+    show_defaults: ShowDefaultsOpt = False,
+    guided: GuidedOpt = False,
 ) -> None:
     """Run a render when no subcommand is provided (default entrypoint)."""
     if ctx.invoked_subcommand is None:
@@ -373,22 +267,6 @@ def _default_to_generate(
         )
 
 
-def _render_pass_count(cfg: RenderConfig) -> int:
-    passes = 1  # background pass
-    if cfg.features.stars:
-        passes += 1
-    if cfg.features.nebula:
-        passes += 1
-    if cfg.features.jpeg_artifact_pass and cfg.output_format == OutputFormat.jpg:
-        passes += 1
-    if cfg.projection_mode in {ProjectionMode.equirectangular, ProjectionMode.both}:
-        passes += 1
-    if cfg.projection_mode in {ProjectionMode.cubemap, ProjectionMode.both}:
-        passes += 1  # cubemap conversion pass
-        passes += 6  # write each cubemap face
-    return passes
-
-
 def _render_stage_labels(cfg: RenderConfig) -> list[str]:
     labels = ["background"]
     if (
@@ -406,6 +284,14 @@ def _render_stage_labels(cfg: RenderConfig) -> list[str]:
         labels.append("stars background")
         if cfg.features.galaxy_view and cfg.features.star_midlayer_scale > 1e-4:
             labels.append("stars mid")
+    elif (
+        cfg.features.hero_star_enabled
+        and int(cfg.features.hero_star_count) > 0
+        and cfg.features.galaxy_view
+        and cfg.features.photoreal_stars
+    ):
+        # Matches generator heroes-only plate (no background/mid/cosmic catalogs).
+        labels.append("stars heroes only")
     if cfg.features.nebula:
         labels.append("nebula clouds/dust")
     if cfg.features.galaxy_view and cfg.features.stars:
@@ -428,186 +314,48 @@ def _render_stage_labels(cfg: RenderConfig) -> list[str]:
 @app.command(hidden=True)
 def generate(
     ctx: typer.Context,
-    width: int = typer.Option(2048, help="Output width for equirectangular renders."),
-    height: int = typer.Option(1024, help="Output height for equirectangular renders."),
-    output_base_name: str = typer.Option("starsky", help="Base filename prefix."),
-    output_dir: Path = typer.Option(
-        Path("output"),
-        "--output-dir",
-        "-o",
-        help="Directory for generated images.",
-    ),
-    generations: int = typer.Option(1, min=1, help="Number of generations to produce."),
-    seed: int | None = typer.Option(None, help="Base random seed for deterministic batches."),
-    projection_mode: ProjectionMode = typer.Option(
-        ProjectionMode.equirectangular,
-        help="Projection target: equirectangular, cubemap, or both.",
-    ),
-    cube: bool = typer.Option(
-        False,
-        "--cube",
-        "-cube",
-        help="Shortcut to include cubemap output (switches equirectangular to both).",
-    ),
-    output_format: OutputFormat = typer.Option(
-        OutputFormat.png, help="Output format (png, jpg, or webp)."
-    ),
-    scene_mode: SceneMode = typer.Option(
-        SceneMode.normal,
-        "--mode",
-        help="Scene recipe: normal=Milky Way band skybox; nebula=broad cloud-complex vista.",
-    ),
-    nebula_mode: NebulaMode = typer.Option(
-        NebulaMode.galaxy_streak,
-        help="Nebula style: distant, full, or galaxy_streak (under --mode normal).",
-    ),
-    quality: int = typer.Option(
-        100, min=50, max=100, help="JPEG/WebP quality (ignored for PNG)."
-    ),
-    cubemap_face_size: int = typer.Option(1024, min=128, max=4096, help="Face size for cubemap outputs."),
-    stars: bool = typer.Option(
-        True, help="Background star catalogs (band/mid/cosmic/halo); heroes are separate."
-    ),
-    depth: bool = typer.Option(
-        True, help="Dim catalog stars toward the poles (not camera DOF)."
-    ),
-    nebula: bool = typer.Option(True, help="Enable nebula gas rendering."),
-    galaxy_view: bool = typer.Option(
-        True,
-        help="Enable Milky Way band under --mode normal (ignored for band under --mode nebula).",
-    ),
-    background_gradient: bool = typer.Option(True, help="Add non-black galactic background gradient."),
-    black_background: bool = typer.Option(
-        False,
-        help="Force black background (overrides gradient/noise background).",
-    ),
-    jpeg_artifact_pass: bool = typer.Option(False, help="Apply JPEG artifact emulation pass."),
-    look_target: LookTarget = typer.Option(
-        LookTarget.cinematic,
-        "--look-target",
-        help=(
-            "cinematic=wrap-safe skybox; documentary=parked photo; "
-            "long_exposure=tracked deep field (sharp points, denser faint stars)."
-        ),
-    ),
-    long_exposure_look: bool = typer.Option(
-        False,
-        "--long-exposure-look/--flat-exposure",
-        help=(
-            "Advanced override for cinematic only (legacy stacked-sky theater). "
-            "Prefer --look-target long_exposure for the tracked deep-field look."
-        ),
-    ),
-    background_texture_strength: float = typer.Option(
-        1.0,
-        min=0.0,
-        max=2.0,
-        help="Unresolved-star grain [0–2]: 0=smooth, 1=default, 2=gritty.",
-    ),
-    nebula_style: Literal["subtle", "balanced", "dramatic"] = typer.Option(
-        "balanced",
-        help="Nebula preset: subtle, balanced, or dramatic.",
-    ),
-    cloud_continuity: float = typer.Option(
-        1.22,
-        min=0.0,
-        max=1.6,
-        help="Connect/thicken cloud volumes [0–1.6]; 0=off.",
-    ),
-    dust_coverage: float = typer.Option(
-        0.98,
-        min=0.0,
-        max=1.6,
-        help="Dark dust area coverage [0–1.6]; 0=none.",
-    ),
-    dust_strength: float = typer.Option(
-        1.14,
-        min=0.0,
-        max=1.8,
-        help="Dust dimming strength [0–1.8]; 0=none.",
-    ),
-
-    nebula_hero_color: str = typer.Option(
-        "magenta",
-        "--nebula-hero-color",
-        help=(
-            "Hero nebula tint: classic-red|red, gold-core|gold, cool-blue|blue, "
-            "magenta-accent|magenta, neutral; or hex (FC5656 or #FC5656) / R,G,B. "
-            "In bash prefer FC5656 unquoted, or quote '#FC5656' (# starts a comment)."
-        ),
-        callback=_validate_nebula_hero_color,
-    ),
-    nebula_interact_density: float | None = typer.Option(
-        None,
-        "--nebula-interact-density",
-        min=0.0,
-        max=1.0,
-        help="Interactive layer density gate [0–1]; higher = only bright emission. Scene default if omitted.",
-    ),
-    nebula_interact_strength: float | None = typer.Option(
-        None,
-        "--nebula-interact-strength",
-        min=0.0,
-        max=1.0,
-        help="Interactive layer strength [0–1]: star glow lean toward local emission. Scene default if omitted.",
-    ),
-    nebula_debug_pass: Literal["normal", "occluder_only", "continuum_only"] = typer.Option(
-        "normal",
-        help="Diagnostic: normal nebula, occluder-only dust RGB, or continuum-only field (galaxy_streak only).",
-    ),
-    render_profile: str = typer.Option(
-        "full",
-        help="physical=linear only; physical_grade=+grade; full=+display finish/grain.",
-    ),
-    isolate_layer: IsolateLayer = typer.Option(
-        IsolateLayer.none,
-        "--isolate-layer",
-        help="Final plate on black: none | background_stars | heroes | nebula_gas.",
-    ),
-    debug_export_layers: bool = typer.Option(
-        False, "--debug-layers", help="Write debug layer PNGs (MW morphology and/or cloud structure/emission/dust, extinction, resolved stars)."
-    ),
-    debug_grayscale_morphology: bool = typer.Option(
-        False,
-        "--grayscale-morphology",
-        help="Write grayscale morphology diagnostic PNG.",
-    ),
-    morphology_void_strength: float = typer.Option(0.72, min=0.0, max=1.0),
-    morphology_scar_strength: float = typer.Option(0.68, min=0.0, max=1.5),
-    noheroes: bool = typer.Option(
-        False,
-        "--noheroes",
-        help="Disable hero stars (spikes/ghosts); independent of --no-stars.",
-    ),
-    background_density: float | None = typer.Option(
-        None,
-        "--background-density",
-        min=0.0,
-        max=2.0,
-        help="Off-plane/cosmic/halo star density [0–2]; blank=look default (~0.30 cinematic).",
-    ),
-    save_as_default: bool = typer.Option(
-        False,
-        "--default",
-        help=(
-            "Merge explicitly passed flags into .license defaults and exit "
-            "(does not render)."
-        ),
-    ),
-    show_defaults: bool = typer.Option(
-        False,
-        "--show-defaults",
-        help="Print custom (.license) and project built-in defaults, then exit.",
-    ),
-    guided: bool = typer.Option(
-        False,
-        "--guided",
-        help=(
-            "Force interactive fine-tuning of arguments (even when other flags "
-            "are set). Bare starsky-gen with no flags already enters guided; "
-            "any other flag uses CLI args + defaults."
-        ),
-    ),
+    width: WidthOpt = 2048,
+    height: HeightOpt = 1024,
+    output_base_name: OutputBaseNameOpt = "starsky",
+    output_dir: OutputDirOpt = Path("output"),
+    generations: GenerationsOpt = 1,
+    seed: SeedOpt = None,
+    projection_mode: ProjectionModeOpt = ProjectionMode.equirectangular,
+    cube: CubeOpt = False,
+    output_format: OutputFormatOpt = OutputFormat.png,
+    scene_mode: SceneModeOpt = SceneMode.normal,
+    nebula_mode: NebulaModeOpt = NebulaMode.galaxy_streak,
+    quality: QualityOpt = 100,
+    cubemap_face_size: CubemapFaceSizeOpt = 1024,
+    stars: StarsOpt = True,
+    depth: DepthOpt = True,
+    nebula: NebulaOpt = True,
+    galaxy_view: GalaxyViewOpt = True,
+    background_gradient: BackgroundGradientOpt = True,
+    black_background: BlackBackgroundOpt = False,
+    jpeg_artifact_pass: JpegArtifactPassOpt = False,
+    look_target: LookTargetOpt = LookTarget.cinematic,
+    long_exposure_look: LongExposureLookOpt = False,
+    background_texture_strength: BackgroundTextureStrengthOpt = 1.0,
+    nebula_style: NebulaStyleOpt = "balanced",
+    cloud_continuity: CloudContinuityOpt = 1.22,
+    dust_coverage: DustCoverageOpt = 0.98,
+    dust_strength: DustStrengthOpt = 1.14,
+    nebula_hero_color: NebulaHeroColorOpt = "magenta",
+    nebula_interact_density: NebulaInteractDensityOpt = None,
+    nebula_interact_strength: NebulaInteractStrengthOpt = None,
+    nebula_debug_pass: NebulaDebugPassOpt = "normal",
+    render_profile: RenderProfileOpt = "full",
+    isolate_layer: IsolateLayerOpt = IsolateLayer.none,
+    debug_export_layers: DebugExportLayersOpt = False,
+    debug_grayscale_morphology: DebugGrayscaleMorphologyOpt = False,
+    morphology_void_strength: MorphologyVoidStrengthOpt = 0.72,
+    morphology_scar_strength: MorphologyScarStrengthOpt = 0.68,
+    noheroes: NoheroesOpt = False,
+    background_density: BackgroundDensityOpt = None,
+    save_as_default: SaveAsDefaultOpt = False,
+    show_defaults: ShowDefaultsOpt = False,
+    guided: GuidedOpt = False,
 ) -> None:
     """Compat alias: prefer bare ``starsky-gen`` (this command is hidden)."""
     _run_generate(
@@ -925,7 +673,10 @@ def _run_generate(
 
     if cube and projection_mode == ProjectionMode.equirectangular:
         projection_mode = ProjectionMode.both
-    run_seed = seed if seed is not None else int(np.random.SeedSequence().entropy)
+    from starsky_gen.batch_seeds import format_batch_seed_summary, resolve_batch_seeds
+
+    batch_seeds = resolve_batch_seeds(seed, generations)
+    run_seed = batch_seeds[0]
 
     cfg = RenderConfig(
         width=width,
@@ -981,7 +732,7 @@ def _run_generate(
                 "output_base_name": cfg.output_base_name,
                 "output_dir": cfg.output_dir,
                 "generations": cfg.generations,
-                "seed": run_seed,
+                "seed": format_batch_seed_summary(seed, batch_seeds),
                 "projection_mode": cfg.projection_mode,
                 "cube": False,
                 "output_format": cfg.output_format,
@@ -997,6 +748,7 @@ def _run_generate(
                 "look_target": cfg.features.look_target,
                 "background_texture_strength": cfg.features.background_texture_strength,
                 "nebula_style": cfg.nebula_tuning.style,
+                "nebula_hero_color": cfg.nebula_tuning.hero_color,
                 "cloud_continuity": cfg.nebula_tuning.cloud_continuity,
                 "dust_coverage": cfg.nebula_tuning.dust_coverage,
                 "dust_strength": cfg.nebula_tuning.dust_strength,
@@ -1011,7 +763,7 @@ def _run_generate(
             },
         )
     elif seed is None:
-        console.print(f"Using random seed: {run_seed}")
+        console.print(f"Using {format_batch_seed_summary(None, batch_seeds)}")
 
     license_state = maybe_prompt_before_generate(console)
     cfg = cfg.model_copy(
@@ -1036,7 +788,9 @@ def _run_generate(
             batch_task = progress.add_task("Batch", total=cfg.generations)
 
         for i in range(cfg.generations):
-            stages = _render_stage_labels(cfg)
+            gen_seed = int(batch_seeds[i])
+            cfg_i = cfg.model_copy(update={"seed": gen_seed})
+            stages = _render_stage_labels(cfg_i)
             render_task = progress.add_task(
                 "Current render",
                 total=max(1, len(stages)),
@@ -1070,13 +824,13 @@ def _run_generate(
                     progress.refresh()
                     last_stage = stage
 
-            outputs, stats = render_single(cfg, i, on_pass_complete=_advance_render)
+            outputs, stats = render_single(cfg_i, i, on_pass_complete=_advance_render)
             completed += 1
             progress.remove_task(render_task)
             if batch_task is not None:
                 progress.advance(batch_task, 1)
 
-            console.print(f"Saved generation {i + 1}: {outputs}")
+            console.print(f"Saved generation {i + 1} (seed {gen_seed}): {outputs}")
             if stats["color_counts"]:
                 console.print(f"  Color counts: {stats['color_counts']}")
                 console.print(f"  Size counts: {stats['size_counts']}")
@@ -1084,7 +838,7 @@ def _run_generate(
     if completed > 0:
         look = getattr(cfg.features, "look_target", None)
         look_s = look.value if hasattr(look, "value") else (str(look) if look is not None else None)
-        last_gen_seed = int(run_seed) + max(0, completed - 1)
+        last_gen_seed = int(batch_seeds[completed - 1])
         record_generations(
             license_state,
             completed,

@@ -257,7 +257,7 @@ def build_band_disruption_field(
     """Asymmetric voids, vertical gouges, and band breaks (1 = deep lane / near disappearance)."""
     h, w = int(height), int(width)
     yy = np.linspace(-1.0, 1.0, h, dtype=np.float64)[:, None]
-    xx = np.linspace(-1.0, 1.0, w, dtype=np.float64)[None, :]
+    np.linspace(-1.0, 1.0, w, dtype=np.float64)[None, :]
     band = np.exp(-((yy**2) / 0.62))
 
     ch, cw = max(6, h // 32), max(10, w // 24)

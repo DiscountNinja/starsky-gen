@@ -10,11 +10,15 @@ def test_mute_speckle_under_nebula_reduces_bright_gas() -> None:
     neb = np.zeros((32, 48), dtype=np.float64)
     neb[8:24, 10:38] = 0.85
     gas_mask = np.ones((32, 48), dtype=np.float64)
+    # Low transmission under the cloud so relative extinction drives mute (flat
+    # ext_paint collapses the percentile span and weakens occ to ~0.32*thick).
+    ext = np.ones((32, 48), dtype=np.float64)
+    ext[8:24, 10:38] = 0.12
     out = _mute_speckle_under_nebula(
         canvas,
         neb,
         gas_mask=gas_mask,
-        ext_paint=np.ones((32, 48)) * 0.7,
+        ext_paint=ext,
         strength=0.8,
     )
     assert float(out[16, 24].mean()) < float(canvas[16, 24].mean()) * 0.55

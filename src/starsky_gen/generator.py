@@ -44,7 +44,7 @@ from starsky_gen.color_science import (
     star_rgb_from_teffective,
     warm_teffective_for_core_bulge,
 )
-from starsky_gen.hdr import HDR_DTYPE, as_hdr, ensure_hdr
+from starsky_gen.hdr import HDR_DTYPE, ensure_hdr
 from starsky_gen.cloud_complex import build_cloud_complex_envelope
 from starsky_gen.config import (
     FeatureConfig,
@@ -70,10 +70,8 @@ from starsky_gen.optical_effects import (
     paint_hero_lens_ghosts,
 )
 from starsky_gen.postfx import (
-    apply_color_stratification,
     apply_depth_of_field,
     apply_directional_motion_blur,
-    apply_lightwrap_stars,
     apply_masked_density_sharpen,
     apply_tri_scale_bloom,
     depth_map_from_disk,
@@ -85,7 +83,6 @@ from starsky_gen.tone_grade import (
     apply_galaxy_scene_tone,
 )
 from starsky_gen.nebula import (
-    _blur_rgb_separable_xy,
     _blur_separable_xy,
     _blur_x_only,
     _blur_y_only,
@@ -93,8 +90,6 @@ from starsky_gen.nebula import (
     generate_nebula,
 )
 from starsky_gen.galactic_band_color import (
-    apply_band_display_microstructure,
-    apply_band_luma_separation,
     apply_galactic_band_color_grade,
     suppress_gold_chroma_islands,
 )
@@ -139,13 +134,10 @@ from starsky_gen.reference_stars import paint_reference_anchors
 from starsky_gen.config import RenderProfile
 from starsky_gen.galactic_structure import (
     GalacticMorphology,
-    GalacticStructure,
-    apply_unresolved_field_to_canvas,
     attach_stellar_population_to_catalog,
     build_galactic_morphology,
     compose_inherited_unresolved_field,
     deposit_catalog_unresolved_flux,
-    build_galactic_structure,
     morphology_grayscale_preview,
     resolved_keep_probability,
 )
@@ -255,23 +247,6 @@ def _placement_kwargs(feat: FeatureConfig) -> dict[str, float | bool]:
         "hierarchical_star_placement": feat.hierarchical_star_placement,
         "population_gradient_strength": feat.stellar_age_gradient_strength,
     }
-
-
-def _midplane_unsharp(
-    rgb: np.ndarray,
-    disk_w: np.ndarray,
-    *,
-    amp: float,
-    periodic_x: bool,
-) -> np.ndarray:
-    if amp <= 1e-6:
-        return rgb
-    luma = np.mean(rgb, axis=2)
-    blur = _blur_separable_xy(luma, passes=2, periodic_x=periodic_x)
-    detail = luma - blur
-    w = np.clip(disk_w, 0.0, 1.0)
-    out = rgb + detail[..., np.newaxis] * w[..., np.newaxis] * amp
-    return np.clip(out, 0.0, None)
 
 
 def _bulge_warmth_scalar(lon: float, lat: float, width: int) -> float:
@@ -398,51 +373,6 @@ def _emission_mask_local_contrast(
     boosted = lu + detail * a * mask
     scale = boosted / np.maximum(lu, 3e-6)
     return np.maximum(rgb * scale[..., np.newaxis], 0.0)
-
-
-def _disk_filmic_luma_grade(
-    rgb: np.ndarray, disk_w: np.ndarray, *, shoulder: float
-) -> np.ndarray:
-    w = disk_w[..., None]
-    lin = np.maximum(rgb, 0.0)
-    lu = (
-        0.2126 * lin[..., 0]
-        + 0.7152 * lin[..., 1]
-        + 0.0722 * lin[..., 2]
-    )
-    k = float(max(shoulder, 0.1))
-    l_new = lu * (1.0 + k * lu) / (1.0 + lu)
-    scale = np.divide(l_new, np.maximum(lu, 7e-8), out=np.ones_like(lu), where=lu > 8e-7)
-    toned = lin * scale[..., None]
-    return rgb * (1.0 - w) + toned * w
-
-
-def _faint_disk_unsharp(
-    rgb: np.ndarray,
-    disk_w: np.ndarray,
-    *,
-    sigma_px: float,
-    amp: float,
-    knee: float,
-    periodic_x: bool,
-) -> np.ndarray:
-    if sigma_px < 1e-5 or amp < 1e-7:
-        return rgb
-    lum = np.clip(
-        0.2126 * rgb[..., 0]
-        + 0.7152 * rgb[..., 1]
-        + 0.0722 * rgb[..., 2],
-        0.0,
-        None,
-    )
-    passes = int(np.clip(round(float(sigma_px)), 2, 8))
-    base = lum * disk_w + np.mean(lum) * (1.0 - disk_w)
-    blurred = _blur_separable_xy(base.astype(np.float64), passes=passes, periodic_x=periodic_x)
-    hi = lum - blurred
-    m = disk_w * (lum < knee)
-    boosted = lum + hi * amp * m
-    s = boosted / np.maximum(lum, 3e-6)
-    return rgb * s[..., None]
 
 
 def _canvas_add_linear(canvas: np.ndarray, delta: np.ndarray, *, galaxy_hdr: bool) -> np.ndarray:
@@ -589,8 +519,10 @@ def _export_morphology_debug_layers(
         _save_layer_u8(np.clip(cloud_structure, 0.0, 1.0), out_dir / "cloud_structure.png")
     if cloud_emission is not None:
         em = np.asarray(cloud_emission, dtype=np.float64)
-        peak = float(np.percentile(em, 99.5)) + 1e-8
-        _save_layer_rgb(np.clip(em / peak, 0.0, 1.0), out_dir / "cloud_emission.png")
+        # Soft display stretch so the underlayer isn't crushed next to hero peaks.
+        lo = float(np.percentile(em, 5.0))
+        hi = float(np.percentile(em, 99.2)) + 1e-8
+        _save_layer_rgb(np.clip((em - lo) / (hi - lo), 0.0, 1.0), out_dir / "cloud_emission.png")
     if cloud_dust is not None:
         _save_layer_u8(np.clip(cloud_dust, 0.0, 1.0), out_dir / "cloud_dust.png")
     if galactic is not None:
@@ -881,38 +813,6 @@ def _soft_knee_star_layer(
     star_img *= (w * factor + (1.0 - w))[..., None]
 
 
-def _luma_tone_map_disk(rgb: np.ndarray, disk_w: np.ndarray, *, k: float = 0.52) -> np.ndarray:
-    """Reinhard-style luma roll-off in the disk only, preserving hue."""
-    lin = np.clip(rgb, 0.0, None)
-    luma = 0.2126 * lin[..., 0] + 0.7152 * lin[..., 1] + 0.0722 * lin[..., 2]
-    l_new = luma / (1.0 + k * luma)
-    scale = np.divide(l_new, luma, out=np.ones_like(luma), where=luma > 1e-8)
-    adjusted = lin * scale[..., None]
-    w = disk_w[..., None]
-    return np.maximum(rgb * (1.0 - w) + adjusted * w, 0.0)
-
-
-def _disk_gamma_lift(rgb: np.ndarray, disk_w: np.ndarray, *, gamma: float = 0.93) -> np.ndarray:
-    """Slight gamma in the disk only: lifts shadow detail (photo print / sensor response)."""
-    w = disk_w[..., None]
-    lifted = np.maximum(rgb, 0.0) ** gamma
-    return np.maximum(0.0, rgb * (1.0 - w) + lifted * w)
-
-
-def _disk_photo_grade(rgb: np.ndarray, disk_w: np.ndarray) -> np.ndarray:
-    """Local disk grade: mild toe lift + soft S-curve on luma (chrominance roughly preserved)."""
-    w = disk_w[..., None]
-    lin = np.maximum(rgb, 0.0)
-    luma = 0.2126 * lin[..., 0] + 0.7152 * lin[..., 1] + 0.0722 * lin[..., 2]
-    toe = np.clip((0.055 - luma) / 0.055, 0.0, 1.0) ** 0.62
-    l_lift = np.clip(luma + 0.018 * toe * disk_w, 0.0, 1.0)
-    t = l_lift - 0.5
-    l_curve = np.clip(0.5 + t * (1.0 + 0.36 * (0.25 - t * t)), 0.0, 1.0)
-    scale = np.divide(l_curve, l_lift, out=np.ones_like(l_lift), where=l_lift > 1e-9)
-    graded = np.maximum(lin * scale[..., None], 0.0)
-    return np.maximum(rgb * (1.0 - w) + graded * w, 0.0)
-
-
 def _dust_scattered_backlight(
     ext: np.ndarray,
     *,
@@ -1025,7 +925,14 @@ def _extinction_from_dust_and_lane(
         0.0,
         1.0,
     )
-    lane_k = 0.34 + 0.20 * cfg.nebula_tuning.dust_strength if cfg.nebula_mode == NebulaMode.galaxy_streak else 0.0
+    lane_k = (
+        0.34 + 0.20 * cfg.nebula_tuning.dust_strength
+        if cfg.nebula_mode == NebulaMode.galaxy_streak
+        else 0.0
+    )
+    # Coarse connected lanes (cloud-complex) must darken even outside galaxy_streak.
+    if lane_p99 >= 0.05:
+        lane_k = max(lane_k, 0.30 + 0.18 * float(cfg.nebula_tuning.dust_strength))
     return np.clip(
         1.0 - dust_occlusion * extinction_strength - lane_boost * lane_k,
         floor,
@@ -1213,11 +1120,12 @@ def _mute_speckle_under_nebula(
         ext = np.clip(np.asarray(ext_paint, dtype=np.float64), 0.0, 1.0)
         lo = float(np.percentile(ext, 12.0))
         hi = float(np.percentile(ext, 88.0))
-        rel = np.clip((ext - lo) / max(hi - lo, 0.06), 0.0, 1.0)
-        # Dense dust (low transmission) still extinguishes; thin gas softens mute.
+        # High transmission → clear; invert so dense dust (low T) strengthens mute.
+        dust = np.clip((hi - ext) / max(hi - lo, 0.06), 0.0, 1.0)
+        # Dense dust still extinguishes; thin gas / shine-through softens mute.
         shine = float(np.clip(shine_through, 0.0, 1.0))
         thin = np.clip(ext**1.15, 0.0, 1.0)
-        occ = thick * (0.32 + 0.68 * rel) * (1.0 - 0.55 * shine * thin)
+        occ = thick * (0.32 + 0.68 * dust) * (1.0 - 0.55 * shine * thin)
     else:
         occ = thick
     occ = np.clip(occ**0.82, 0.0, 0.90)
@@ -1360,37 +1268,6 @@ def _structure_host_gate(
         return host * latitude_plane_gate(int(height), sigma=0.42, power=1.08)
     yy = np.linspace(-1.0, 1.0, int(height), dtype=np.float64)[:, None]
     return np.exp(-((yy**2) / 0.50))
-
-
-def _add_morphology_band_nebula_body(
-    canvas: np.ndarray,
-    galactic: GalacticMorphology,
-    disk_w: np.ndarray,
-    rng: np.random.Generator,
-    *,
-    strength: float = 1.0,
-    hierarchy_strength: float = 0.82,
-    white_brightness: float = 1.22,
-    periodic_x: bool,
-) -> np.ndarray:
-    """In-band ISM pass only: white bright, gold warm, black dust (single additive pass).
-
-    Red H II is accumulated separately in ``off_band_layer`` (decoupled from the band).
-    """
-    from starsky_gen.structure_envelope import build_morphology_ism_rgb
-
-    h, w = canvas.shape[0], canvas.shape[1]
-    rgb, _ = build_morphology_ism_rgb(
-        galactic,
-        rng,
-        h,
-        w,
-        hierarchy_strength=hierarchy_strength,
-        white_brightness=white_brightness,
-        periodic_x=periodic_x,
-    )
-    amp = float(np.clip(strength, 0.0, 4.0)) * 0.72
-    return np.maximum(0.0, canvas + rgb * amp)
 
 
 def _off_band_emission_mask(
@@ -1801,36 +1678,6 @@ def _compress_band_highlights(
     return np.maximum(0.0, out)
 
 
-def _limit_band_linear_headroom(
-    canvas: np.ndarray,
-    disk_w: np.ndarray,
-    *,
-    percentile: float = 99.0,
-    target_peak: float = 0.48,
-) -> np.ndarray:
-    """Scale down linear HDR when the stack runs hot (before asinh / display tone)."""
-    lin = np.maximum(np.asarray(canvas, dtype=np.float64), 0.0)
-    lu = rec709_luma(lin)
-    positive = lu[lu > 1e-8]
-    if positive.size < 64:
-        return lin
-    peak = float(np.percentile(positive, float(np.clip(percentile, 96.0, 99.6))))
-    tgt = float(np.clip(target_peak, 0.32, 0.62))
-    if peak <= tgt + 1e-6:
-        return lin
-    scale = tgt / peak
-    dw = np.clip(np.asarray(disk_w, dtype=np.float64), 0.0, 1.0)
-    h, w_img = int(lin.shape[0]), int(lin.shape[1])
-    if dw.shape != (h, w_img):
-        if dw.ndim == 2 and dw.shape[1] == 1:
-            dw = np.broadcast_to(dw, (h, w_img))
-        elif dw.size == h:
-            dw = np.broadcast_to(dw.reshape(h, 1), (h, w_img))
-    plane = np.clip(0.55 + 0.45 * dw**1.02, 0.55, 1.0)[..., np.newaxis]
-    eff = scale * plane + scale * (1.0 - plane) * 0.82
-    return np.maximum(0.0, lin * eff)
-
-
 def finalize_band_linear_hdr(
     canvas: np.ndarray,
     disk_w: np.ndarray,
@@ -1998,6 +1845,137 @@ def _attenuate_stars_for_plane(
     return np.maximum(0.0, stars * atten[..., np.newaxis])
 
 
+def _hero_star_protect_mask(
+    height: int,
+    width: int,
+    hero_records: list[HeroStarRecord] | None,
+    *,
+    radius_px: float = 7.0,
+) -> np.ndarray:
+    """Soft disks around hero anchors — regular-star modulation must not touch these."""
+    mask = np.zeros((int(height), int(width)), dtype=np.float64)
+    if not hero_records:
+        return mask
+    h, w = int(height), int(width)
+    rad = max(2, int(round(float(radius_px))))
+    yy, xx = np.ogrid[-rad : rad + 1, -rad : rad + 1]
+    stamp = np.exp(-(xx * xx + yy * yy) / max(0.35 * rad * rad, 0.2))
+    for rec in hero_records:
+        x = int(np.round(rec.x)) % w
+        y = int(np.clip(np.round(rec.y), 0, h - 1))
+        for dy in range(-rad, rad + 1):
+            yi = y + dy
+            if yi < 0 or yi >= h:
+                continue
+            for dx in range(-rad, rad + 1):
+                s = float(stamp[dy + rad, dx + rad])
+                if s < 1e-3:
+                    continue
+                xi = (x + dx) % w
+                if s > mask[yi, xi]:
+                    mask[yi, xi] = s
+    return np.clip(mask, 0.0, 1.0)
+
+
+def _nebula_emission_star_modulate(
+    stars: np.ndarray,
+    dens: np.ndarray,
+    *,
+    hero_mask: np.ndarray | None = None,
+    dim_k: float = 0.28,
+    floor: float = 0.58,
+    warm: bool = True,
+) -> np.ndarray:
+    """Light dens-based dim/warmth on regular stars; heroes stay full (mask→1)."""
+    d = np.clip(np.asarray(dens, dtype=np.float64), 0.0, 1.0)
+    atten = np.clip(1.0 - float(dim_k) * d, float(floor), 1.0)
+    if hero_mask is not None:
+        hm = np.clip(np.asarray(hero_mask, dtype=np.float64), 0.0, 1.0)
+        atten = atten * (1.0 - hm) + 1.0 * hm
+    out = np.maximum(0.0, stars * atten[..., np.newaxis])
+    if warm:
+        warm_scale = np.stack(
+            [
+                1.0 + 0.10 * d,
+                1.0 - 0.07 * d,
+                1.0 - 0.18 * d,
+            ],
+            axis=-1,
+        )
+        if hero_mask is not None:
+            hm3 = hm[..., np.newaxis]
+            warm_scale = warm_scale * (1.0 - hm3) + 1.0 * hm3
+        out = np.clip(out * warm_scale, 0.0, None)
+    return out
+
+
+def _composite_nebula_heroes_on_top(
+    canvas: np.ndarray,
+    hero_records: list[HeroStarRecord],
+    rng: np.random.Generator,
+    *,
+    width: int,
+    height: int,
+    spike_max: int,
+    ghost_strength: float,
+    periodic_x: bool,
+) -> np.ndarray:
+    """Paint hero cores (+ spikes/ghosts) after nebula so they always sit on top, sharp."""
+    if not hero_records:
+        return canvas
+    out = np.asarray(canvas, dtype=np.float64).copy()
+    h, w = int(height), int(width)
+    for rec in hero_records:
+        x = int(np.round(rec.x)) % w
+        y = int(np.clip(np.round(rec.y), 0, h - 1))
+        amp = float(np.clip(0.55 + 0.35 * np.log10(max(rec.flux, 1.0)), 0.55, 1.85))
+        rgb = np.clip(np.asarray(rec.rgb, dtype=np.float64).reshape(3), 0.05, 1.5)
+        rgb = rgb / (float(np.max(rgb)) + 1e-8)
+        rad = max(2, int(round(2.2 + 1.1 * amp)))
+        yy, xx = np.ogrid[-rad : rad + 1, -rad : rad + 1]
+        # Tight core — keep locked pin sharpness (no nebula-matched blur).
+        core = np.exp(-(xx * xx + yy * yy) / max(0.22 * rad * rad, 0.18))
+        wing = np.exp(-(xx * xx + yy * yy) / max(0.85 * rad * rad, 0.5)) * 0.22
+        stamp = np.clip(core + wing, 0.0, 1.0)
+        for dy in range(-rad, rad + 1):
+            yi = y + dy
+            if yi < 0 or yi >= h:
+                continue
+            for dx in range(-rad, rad + 1):
+                s = float(stamp[dy + rad, dx + rad])
+                if s < 1e-4:
+                    continue
+                xi = (x + dx) % w
+                add = rgb * (amp * s)
+                out[yi, xi] = np.maximum(out[yi, xi], np.clip(add, 0.0, 1.0))
+    if float(ghost_strength) > 1e-6:
+        out = paint_hero_lens_ghosts(
+            out,
+            hero_records,
+            rng,
+            strength=float(ghost_strength),
+            periodic_x=periodic_x,
+        )
+    if int(spike_max) > 0:
+        for rec in hero_records:
+            if rng.random() >= 0.78:
+                continue
+            tint = np.clip(np.asarray(rec.rgb, dtype=np.float64).reshape(-1)[:3], 0.05, 1.5)
+            _paint_thin_diffraction_spikes(
+                out,
+                int(np.round(rec.x)) % w,
+                int(np.clip(np.round(rec.y), 0, h - 1)),
+                8,
+                tint,
+                rng,
+                force=True,
+                flux_scale=float(
+                    np.clip(6.5 + 0.35 * np.log10(max(rec.flux, 1.0)), 6.5, 12.0)
+                ),
+            )
+    return np.clip(out, 0.0, 1.0)
+
+
 def _empty_star_stats() -> dict[str, dict[str, int]]:
     return {
         "color_counts": {n: 0 for n in STAR_COLOR_NAMES},
@@ -2116,57 +2094,6 @@ def _paint_size_soft_glow(
         )
 
 
-def _paint_hero_wide_halo_and_airy(
-    img: np.ndarray,
-    yi: int,
-    xi: int,
-    spectral: np.ndarray,
-    flux: float,
-    rng: np.random.Generator,
-    *,
-    subpixel_dx: float = 0.0,
-    subpixel_dy: float = 0.0,
-    periodic_x: bool = True,
-) -> None:
-    """Secondary wide photographic halo + rare faint Airy ring on hero anchors only."""
-    glow_e = float(np.clip(8.5 * np.log1p(max(flux, 0.0) / 28.0), 4.0, 28.0))
-    amp = spectral.astype(np.float64) * glow_e
-    # Wide, very low veil so heroes feel like bright sources without becoming blobs.
-    wh = int(rng.integers(16, 24))
-    wsig = float(rng.uniform(11.0, 17.0))
-    wk = normalized_gaussian_kernel_cached(wh, wsig)
-    stamp_psf_patch(
-        img,
-        yi,
-        xi,
-        wk,
-        amp * float(rng.uniform(0.10, 0.18)),
-        periodic_x=periodic_x,
-        subpixel_dx=subpixel_dx,
-        subpixel_dy=subpixel_dy,
-    )
-    if rng.random() >= 0.28:
-        return
-    # Soft diffraction ring via difference-of-Gaussians (not a hard circle).
-    rsig = float(rng.uniform(5.5, 8.5))
-    rh = int(np.clip(round(rsig * 2.8), 12, 22))
-    k_out = normalized_gaussian_kernel_cached(rh, rsig)
-    k_in = normalized_gaussian_kernel_cached(rh, rsig * 0.72)
-    ring = np.maximum(k_out - k_in * 0.92, 0.0)
-    rsum = float(np.sum(ring)) + 1e-8
-    ring = ring / rsum
-    stamp_psf_patch(
-        img,
-        yi,
-        xi,
-        ring,
-        amp * float(rng.uniform(0.045, 0.085)),
-        periodic_x=periodic_x,
-        subpixel_dx=subpixel_dx,
-        subpixel_dy=subpixel_dy,
-    )
-
-
 def _nebula_interact_glow_rgb(
     star_rgb: np.ndarray,
     emission_rgb: np.ndarray | None,
@@ -2180,6 +2107,7 @@ def _nebula_interact_glow_rgb(
 
     ``density`` gates where mix applies (brighter emission → more mix).
     ``strength`` scales how far glow leans toward nebula RGB. Cores stay spectral.
+    Gate is squared so only a few dense pockets pick up gold/cool tint.
     """
     out = np.asarray(star_rgb, dtype=np.float64).reshape(-1)[:3].copy()
     s = float(np.clip(strength, 0.0, 1.0))
@@ -2195,8 +2123,8 @@ def _nebula_interact_glow_rgb(
     luma = float(0.2126 * local[0] + 0.7152 * local[1] + 0.0722 * local[2])
     # Density: higher value = stricter gate (need brighter emission to mix).
     thr = float(np.clip(density, 0.05, 0.95))
-    # Smoothstep from ~thr*0.55 to thr*1.35
-    lo, hi = thr * 0.55, thr * 1.35
+    # Smoothstep from ~thr*0.60 to thr*1.35 (sparse dense cores only).
+    lo, hi = thr * 0.60, thr * 1.35
     if luma <= lo:
         gate = 0.0
     elif luma >= hi:
@@ -2204,6 +2132,7 @@ def _nebula_interact_glow_rgb(
     else:
         t = (luma - lo) / max(hi - lo, 1e-6)
         gate = t * t * (3.0 - 2.0 * t)
+    gate = gate * gate
     mix = s * gate
     if mix < 1e-5:
         return out
@@ -3212,10 +3141,95 @@ def _enforce_horizontal_wrap(img: np.ndarray, *, seam_width: int | None = None) 
     return np.clip(img, 0.0, 1.0)
 
 
+def _paint_heroes_only_plate(
+    *,
+    cfg: RenderConfig,
+    rng: np.random.Generator,
+    stars_bg: np.ndarray,
+    disk_w: np.ndarray | None,
+    galactic: GalacticMorphology | None,
+    cloud_structure: np.ndarray | None,
+    scene_nebula: bool,
+    hero_records: list[HeroStarRecord],
+    nebula_interact_rgb: np.ndarray | None,
+    notify: Callable[[str, float], None],
+) -> dict[str, dict[str, int]] | None:
+    """Hero-only plate: no background/mid/cosmic/halo catalogs. Returns catalog stats if painted."""
+    notify("stars heroes only", 0.0)
+    from starsky_gen.placement import EQUIRECT_LAT_POLE_MARGIN_FULL_SKY
+
+    n_cand = max(48, int(cfg.features.hero_star_count) * 20)
+    cat_hero = sample_isotropic_cosmic_catalog(
+        rng,
+        cfg.width,
+        cfg.height,
+        density_scale=1.0,
+        density_scale_mult=1.0,
+        attach_apparent_mag=True,
+        anchor_count=0,
+        pole_margin=(EQUIRECT_LAT_POLE_MARGIN_FULL_SKY if scene_nebula else None),
+    )
+    n0 = int(np.asarray(cat_hero["lon"]).shape[0])
+    if n0 > n_cand:
+        pick = rng.choice(n0, size=n_cand, replace=False)
+        cat_hero = {
+            k: (v[pick] if isinstance(v, np.ndarray) and v.shape[:1] == (n0,) else v)
+            for k, v in cat_hero.items()
+        }
+    struct_w = cloud_structure
+    if struct_w is None and galactic is not None:
+        struct_w = np.clip(
+            np.asarray(galactic.star_formation, dtype=np.float64), 0.0, 1.0
+        )
+    hero_idx = select_hero_indices(
+        cat_hero,
+        width=cfg.width,
+        height=cfg.height,
+        disk_weight=None if scene_nebula else (
+            disk_w if disk_w is not None else (
+                galactic.disk_weight if galactic is not None else None
+            )
+        ),
+        count=int(cfg.features.hero_star_count),
+        min_sep_frac=0.10,
+        off_plane_slots=0 if scene_nebula else 2,
+        rng=rng,
+        placement="full_sky" if scene_nebula else "rim",
+        structure_weight=struct_w,
+    )
+    stats_out: dict[str, dict[str, int]] | None = None
+    if hero_idx.size > 0:
+        n_h = int(np.asarray(cat_hero["lon"]).shape[0])
+        cat_only = {
+            k: (v[hero_idx] if isinstance(v, np.ndarray) and v.shape[:1] == (n_h,) else v)
+            for k, v in cat_hero.items()
+        }
+        attach_hero_flags(cat_only, np.arange(hero_idx.size, dtype=np.int64))
+        stats_out = _add_stars_from_catalog(
+            stars_bg,
+            rng,
+            cfg,
+            cat_only,
+            foreground_layer=False,
+            galaxy_disk_cool_stars=False,
+            point_disk_stars=False,
+            population="cosmic",
+            progress_cb=lambda p: notify("stars heroes only", p),
+            hero_records=hero_records,
+            nebula_emission_rgb=nebula_interact_rgb,
+        )
+    notify("stars heroes only", 1.0)
+    return stats_out
+
+
+# Progress hook accepts (stage, progress), (stage,), or () — callers vary.
+PassCompleteCallback = Callable[..., None]
+
+
 def render_single(
     cfg: RenderConfig,
     generation_index: int,
-    on_pass_complete: Callable[[str, float], None] | Callable[[str], None] | Callable[[], None] | None = None,
+    on_pass_complete: PassCompleteCallback | None = None,
 ) -> tuple[dict[str, Path], dict[str, dict[str, int]]]:
     cfg = finalize_render_config(cfg)
     mw_band = use_mw_band(cfg)
@@ -3228,14 +3242,15 @@ def render_single(
         if on_pass_complete is None:
             return
         try:
-            on_pass_complete(stage, float(np.clip(progress, 0.0, 1.0)))  # type: ignore[misc]
+            on_pass_complete(stage, float(np.clip(progress, 0.0, 1.0)))
         except TypeError:
             try:
-                on_pass_complete(stage)  # type: ignore[misc]
+                on_pass_complete(stage)
             except TypeError:
-                on_pass_complete()  # type: ignore[operator]
+                on_pass_complete()
 
-    seed = (cfg.seed or 0) + generation_index
+    # Absolute seed for this plate (CLI / batch_seeds resolves sequential or unique-random).
+    seed = int(cfg.seed if cfg.seed is not None else 0)
     seed_seq = np.random.SeedSequence(seed)
     (
         rng_bg,
@@ -3468,7 +3483,14 @@ def render_single(
             neb0 = np.clip(cloud_emission, 0.0, 1.0)
             neb_emit0 = np.clip(cloud_emission * 0.96, 0.0, 1.0)
             dust0 = np.clip(cloud_dust, 0.0, 1.0)
-            lane0 = np.zeros((cfg.height, cfg.width), dtype=np.float64)
+            # Coarse connected lanes from dust (not freckle-only zeros).
+            from starsky_gen.cloud_complex import _gauss_float as _gauss_lane
+
+            lane0 = np.clip(
+                _gauss_lane(dust0, 6.5, periodic_x=wrap_lon_blur_x) ** 0.72,
+                0.0,
+                1.0,
+            )
             _notify_stage("nebula prep", 0.85)
         else:
             neb0, neb_emit0, dust0, lane0 = generate_nebula(
@@ -3526,7 +3548,6 @@ def render_single(
             # Epic full-sky field: no MW midplane weight — isotropic + mild knots.
             from starsky_gen.placement import (
                 EQUIRECT_LAT_POLE_MARGIN_FULL_SKY,
-                EQUIRECT_POLE_TAPER_FRAC_FULL_SKY,
             )
 
             phot_kw["isotropic_field"] = True
@@ -3919,71 +3940,20 @@ def render_single(
         and cfg.features.galaxy_view
         and cfg.features.photoreal_stars
     ):
-        # Hero-only plate: no background/mid/cosmic/halo catalogs.
-        _notify_stage("stars heroes only", 0.0)
-        from starsky_gen.placement import EQUIRECT_LAT_POLE_MARGIN_FULL_SKY
-
-        n_cand = max(48, int(cfg.features.hero_star_count) * 20)
-        cat_hero = sample_isotropic_cosmic_catalog(
-            rng_stars_bg,
-            cfg.width,
-            cfg.height,
-            density_scale=1.0,
-            density_scale_mult=1.0,
-            attach_apparent_mag=True,
-            anchor_count=0,
-            pole_margin=(EQUIRECT_LAT_POLE_MARGIN_FULL_SKY if scene_nebula else None),
-        )
-        # Trim / pad candidate pool to n_cand for selection stability.
-        n0 = int(np.asarray(cat_hero["lon"]).shape[0])
-        if n0 > n_cand:
-            pick = rng_stars_bg.choice(n0, size=n_cand, replace=False)
-            cat_hero = {
-                k: (v[pick] if isinstance(v, np.ndarray) and v.shape[:1] == (n0,) else v)
-                for k, v in cat_hero.items()
-            }
-        struct_w = cloud_structure
-        if struct_w is None and galactic is not None:
-            struct_w = np.clip(
-                np.asarray(galactic.star_formation, dtype=np.float64), 0.0, 1.0
-            )
-        hero_idx = select_hero_indices(
-            cat_hero,
-            width=cfg.width,
-            height=cfg.height,
-            disk_weight=None if scene_nebula else (
-                disk_w if disk_w is not None else (
-                    galactic.disk_weight if galactic is not None else None
-                )
-            ),
-            count=int(cfg.features.hero_star_count),
-            min_sep_frac=0.10,
-            off_plane_slots=0 if scene_nebula else 2,
+        hero_stats = _paint_heroes_only_plate(
+            cfg=cfg,
             rng=rng_stars_bg,
-            placement="full_sky" if scene_nebula else "rim",
-            structure_weight=struct_w,
+            stars_bg=stars_bg,
+            disk_w=disk_w,
+            galactic=galactic,
+            cloud_structure=cloud_structure,
+            scene_nebula=scene_nebula,
+            hero_records=hero_records,
+            nebula_interact_rgb=nebula_interact_rgb,
+            notify=_notify_stage,
         )
-        if hero_idx.size > 0:
-            n_h = int(np.asarray(cat_hero["lon"]).shape[0])
-            cat_only = {
-                k: (v[hero_idx] if isinstance(v, np.ndarray) and v.shape[:1] == (n_h,) else v)
-                for k, v in cat_hero.items()
-            }
-            attach_hero_flags(cat_only, np.arange(hero_idx.size, dtype=np.int64))
-            stats = _add_stars_from_catalog(
-                stars_bg,
-                rng_stars_bg,
-                cfg,
-                cat_only,
-                foreground_layer=False,
-                galaxy_disk_cool_stars=False,
-                point_disk_stars=False,
-                population="cosmic",
-                progress_cb=lambda p: _notify_stage("stars heroes only", p),
-                hero_records=hero_records,
-                nebula_emission_rgb=nebula_interact_rgb,
-            )
-        _notify_stage("stars heroes only", 1.0)
+        if hero_stats is not None:
+            stats = hero_stats
 
     # Inherited unresolved luminous field on canvas before dust/extinction (resolved stars later).
     # Morphology-smoothing choke point: continuum blur + speckle σ-pyramid on g×T prior (see
@@ -4025,7 +3995,13 @@ def render_single(
                 neb = np.clip(cloud_emission, 0.0, 1.0)
                 neb_emit = np.clip(cloud_emission * 0.96, 0.0, 1.0)
                 dust_occlusion = np.clip(cloud_dust, 0.0, 1.0)
-                lane_ext = np.zeros((cfg.height, cfg.width), dtype=np.float64)
+                from starsky_gen.cloud_complex import _gauss_float as _gauss_lane2
+
+                lane_ext = np.clip(
+                    _gauss_lane2(dust_occlusion, 6.5, periodic_x=wrap_lon_blur_x) ** 0.72,
+                    0.0,
+                    1.0,
+                )
             else:
                 neb, neb_emit, dust_occlusion, lane_ext = generate_nebula(
                     rng_nebula,
@@ -4242,7 +4218,6 @@ def render_single(
             plane_gate = latitude_plane_gate(cfg.height, sigma=0.42, power=1.02)
             bleed_gate = latitude_plane_gate(cfg.height, sigma=0.50, power=0.94)
         wisp_gate: np.ndarray | None = None
-        wisp_halo: np.ndarray | None = None
         if (
             cfg.nebula_mode == NebulaMode.galaxy_streak
             and plane_gate is not None
@@ -4262,7 +4237,6 @@ def render_single(
                 periodic_x=wrap_lon_blur_x,
             )
             # Annular wisp_halo caused horizontal worm/cellular streaks above/below the band.
-            wisp_halo = None
             bleed_gate = np.clip(np.maximum(bleed_gate, wisp_gate * 0.94), 0.0, 1.0)
         band_bleed_env: np.ndarray | None = None
         core_void_mask: np.ndarray | None = None
@@ -4350,6 +4324,10 @@ def render_single(
         )
         emit_mask = emit_clear
         gas_mask = emit_clear
+        if scene_nebula:
+            # Soft base must survive extinction lanes; only gentle carve.
+            emit_mask = np.clip(0.62 + 0.38 * emit_clear, 0.0, 1.0)
+            gas_mask = np.clip(0.70 + 0.30 * emit_clear, 0.0, 1.0)
         if dust_primary:
             emit_gate_p = float(cfg.features.morphology_nebula_emit_gate_power)
             emit_mask = np.clip(emit_clear**emit_gate_p, 0.0, 1.0)
@@ -4541,17 +4519,23 @@ def render_single(
         if _dw_vis.shape != (cfg.height, cfg.width):
             _dw_vis = np.broadcast_to(_dw_vis, (cfg.height, cfg.width))
         # Softer vertical gate so gas fills the band envelope, not a razor-thin row.
-        # Nebula scene: gate on emission luma (already dust×structure gated) — avoid
-        # a midplane floor that re-fills the whole FOV with soup.
+        # Nebula scene: cloud_emission already has soft base + hero — do not re-crush
+        # lows with a peak-weighted gate (that erased the underlayer to black voids).
         if scene_nebula:
-            density_gate = np.clip(neb_luma**0.72 * (0.55 + 0.45 * neb_peaks), 0.0, 1.0)
+            density_gate = np.clip(0.55 + 0.45 * neb_luma**0.40, 0.0, 1.0)
+            gas_visibility = np.clip(
+                np.maximum(neb_luma**0.30, 0.28 * (neb_luma > 1e-4).astype(np.float64)),
+                0.0,
+                1.0,
+            )
+            gas_visibility = np.clip(gas_visibility * density_gate, 0.0, 1.0)
         else:
             density_gate = np.clip(_dw_vis**1.38, 0.0, 1.0)
-        gas_visibility = np.clip(
-            (neb_luma**0.48) * (0.82 + 0.62 * neb_peaks) * density_gate,
-            0.0,
-            1.0,
-        )
+            gas_visibility = np.clip(
+                (neb_luma**0.48) * (0.82 + 0.62 * neb_peaks) * density_gate,
+                0.0,
+                1.0,
+            )
         _gas_vis_gate = (
             wisp_gate
             if dust_primary and wisp_gate is not None
@@ -4891,12 +4875,11 @@ def render_single(
                 else np.ones((cfg.height, cfg.width), dtype=np.float64)
             )
             if scene_nebula:
-                # Full-FOV complex: structure host + dark freckles (no |lat| midplane gate).
-                # Multi-hue tints — avoid monochrome salmon wash.
+                # Full-FOV complex: keep emit tints near-neutral so hero color survives.
                 off_emit_gate = np.clip(1.0 - dw_emit, 0.0, 1.0) ** 0.85
                 band_emit_gate = np.clip(dw_emit, 0.0, 1.0)
-                emit_tint_band = np.array([1.02, 0.72, 0.88], dtype=np.float64)
-                emit_tint_off = np.array([0.92, 0.55, 1.05], dtype=np.float64)
+                emit_tint_band = np.array([1.00, 0.98, 1.02], dtype=np.float64)
+                emit_tint_off = np.array([0.96, 0.98, 1.04], dtype=np.float64)
             else:
                 off_emit_gate = _off_band_emission_mask(
                     dw_emit,
@@ -4911,11 +4894,10 @@ def render_single(
             band_tint = emit_tint_band * (1.0 - wing[..., np.newaxis]) + ha_band * wing[..., np.newaxis]
             emit_band = emit_layer * band_emit_gate[..., np.newaxis] * band_tint
             if scene_nebula:
-                # Cool reflection + Hα wing near bright cores (Orion-like accent).
+                # Tiny cool skirt only — large flat cool/warm adds washed hero color.
                 cool = dw_emit[..., None] * np.array([0.16, 0.42, 0.78], dtype=np.float64)
-                warm = dw_emit[..., None] * np.array([0.70, 0.28, 0.22], dtype=np.float64)
                 peak = float(np.percentile(emit_luma, 75) + 1e-6)
-                emit_band = emit_band + cool * 0.28 * peak + warm * 0.14 * peak
+                emit_band = emit_band + cool * 0.06 * peak
             emit_off = (
                 emit_layer
                 * np.clip(off_emit_gate**1.72, 0.0, 1.0)[..., np.newaxis]
@@ -4936,12 +4918,14 @@ def render_single(
                 1.0,
             )
             emit_hot_band = emit_hot * band_emit_gate
+            # Nebula scene already painted colored cloud_emission via neb_gas —
+            # a second full screen-add washes hero chroma to beige/white.
             canvas = composite_emission_add_screen(
                 canvas,
                 emit_band,
                 emit_hot_band,
-                add_strength=1.0,
-                core_screen_mix=0.68,
+                add_strength=0.32 if scene_nebula else 1.0,
+                core_screen_mix=0.10 if scene_nebula else 0.68,
             )
             emit_unsharp = float(cfg.features.emission_unsharp_amount) * float(
                 cfg.features.nebula_color_strength
@@ -5789,6 +5773,30 @@ def render_single(
                     star_stack = star_stack * np.clip(
                         0.68 + 0.32 * ext_k ** (1.02 - 0.28 * shine), 0.58, 1.0
                     )[..., np.newaxis]
+                    # Regular stars: light dens dim/warmth so they sit in the volume.
+                    # Hero anchors stay full — painted on top again after remask.
+                    if cloud_emission is not None:
+                        from starsky_gen.cloud_complex import _gauss_float as _gauss_em
+
+                        em_lum = np.mean(
+                            np.clip(np.asarray(cloud_emission, dtype=np.float64), 0.0, 1.0),
+                            axis=2,
+                        )
+                        p95 = float(np.percentile(em_lum, 95)) + 1e-8
+                        dens = np.clip(em_lum / p95, 0.0, 1.0)
+                        dens = _gauss_em(dens, 2.8, periodic_x=wrap_lon_blur_x)
+                        dens = np.clip(dens**1.15, 0.0, 1.0)
+                        hero_m = _hero_star_protect_mask(
+                            cfg.height, cfg.width, hero_records, radius_px=7.0
+                        )
+                        star_stack = _nebula_emission_star_modulate(
+                            star_stack,
+                            dens,
+                            hero_mask=hero_m,
+                            dim_k=0.28,
+                            floor=0.58,
+                            warm=True,
+                        )
                 elif (
                     ext_paint_for_fg is not None
                     and stars_above_nebula
@@ -5907,6 +5915,32 @@ def render_single(
                         peak_soft_clamp=peak_clamp,
                         max_blend_in_band=blend_in_band,
                     )
+                # Scene nebula: light dens modulate on regular star add only;
+                # heroes stay sharp/full (re-composited after remask).
+                if scene_nebula and cloud_emission is not None and stars_above_nebula:
+                    from starsky_gen.cloud_complex import _gauss_float as _gauss_star_em
+
+                    em_lum = np.mean(
+                        np.clip(np.asarray(cloud_emission, dtype=np.float64), 0.0, 1.0),
+                        axis=2,
+                    )
+                    p95 = float(np.percentile(em_lum, 95)) + 1e-8
+                    dens = np.clip(em_lum / p95, 0.0, 1.0)
+                    dens = _gauss_star_em(dens, 2.4, periodic_x=wrap_lon_blur_x)
+                    dens = np.clip(dens**1.10, 0.0, 1.0)
+                    star_delta = np.maximum(0.0, canvas - _canvas_pre_stars)
+                    hero_m = _hero_star_protect_mask(
+                        cfg.height, cfg.width, hero_records, radius_px=7.0
+                    )
+                    star_delta = _nebula_emission_star_modulate(
+                        star_delta,
+                        dens,
+                        hero_mask=hero_m,
+                        dim_k=0.30,
+                        floor=0.55,
+                        warm=True,
+                    )
+                    canvas = np.clip(_canvas_pre_stars + star_delta, 0.0, 1.0)
                 if (
                     stars_above_nebula
                     and float(cfg.features.post_star_lane_protect_strength) > 1e-6
@@ -5965,7 +5999,12 @@ def render_single(
                         star_overlay_pending=_medium_only_grade,
                         **_display_kw,
                     )
-        if hero_records and float(cfg.features.hero_lens_ghost_strength) > 1e-6:
+        # Nebula scene re-paints heroes after remask; skip early ghosts there.
+        if (
+            hero_records
+            and float(cfg.features.hero_lens_ghost_strength) > 1e-6
+            and not scene_nebula
+        ):
             canvas = paint_hero_lens_ghosts(
                 canvas,
                 hero_records,
@@ -6163,7 +6202,8 @@ def render_single(
                 )
         canvas = ensure_hdr(np.clip(canvas, 0.0, 1.0))
 
-    # Nebula on black: grade/ISM lifts voids to mid-grey — remask to gated emission.
+    # Nebula on black: grade/ISM lifts voids to mid-grey — remask to emission.
+    # Keep-floor lets the soft base underlayer survive; only true empties crush.
     if (
         scene_nebula
         and cfg.features.black_background
@@ -6180,14 +6220,187 @@ def render_single(
             0.0,
             1.0,
         )
-        # Softer power so bright cores survive remask; voids still crush to near-black.
-        gate = np.clip(gate ** 0.62, 0.0, 1.0)
-        # Deeper cinematic field: darken + desaturate outside emission so nebula pops.
-        outside = np.clip(1.0 - gate, 0.0, 1.0)[..., np.newaxis]
+        # Preserve immersive dim envelope; crush only near-zero empties (not surrounds).
+        gate = np.clip(gate ** 0.38, 0.0, 1.0)
+        soft_keep = np.clip(el / (float(np.percentile(el, 70)) + 1e-8), 0.0, 1.0)
+        soft_keep = np.clip(
+            soft_keep * 0.35 + _gauss_void(soft_keep, 7.0, periodic_x=wrap_lon_blur_x) * 0.65,
+            0.0,
+            1.0,
+        )
+        vista_keep = np.clip(el / (float(np.percentile(el, 40)) + 1e-8), 0.0, 1.0) ** 0.45
+        vista_keep = _gauss_void(vista_keep, 10.0, periodic_x=wrap_lon_blur_x)
+        # Structured ambient floor — cloudy keep, not a flat constant wash.
+        amb_guide = _gauss_void(el, 14.0, periodic_x=wrap_lon_blur_x)
+        amb_guide = np.clip(
+            amb_guide / (float(np.percentile(amb_guide, 55)) + 1e-8),
+            0.0,
+            1.35,
+        )
+        # Equirect poles (top/bottom rows) get a higher keep so remask can't punch black caps.
+        yy_k = np.linspace(-1.0, 1.0, int(el.shape[0]), dtype=np.float64)[:, None]
+        pole_keep = np.clip(np.abs(yy_k) ** 1.05, 0.0, 1.0)
+        pole_cap_k = np.clip((np.abs(yy_k) - 0.64) / 0.36, 0.0, 1.0) ** 0.85
+        ambient_keep = np.clip(
+            0.30 + 0.22 * amb_guide + 0.20 * pole_keep + 0.22 * pole_cap_k,
+            0.30,
+            0.65,
+        )
+        keep = np.clip(
+            np.maximum(
+                np.maximum(gate, soft_keep * 0.85),
+                np.maximum(vista_keep * 0.78, ambient_keep),
+            ),
+            0.0,
+            1.0,
+        )
+        # Soft crush only — immersive underlayer must survive near-empty pockets.
+        keep = np.clip(keep * np.clip(el / (peak * 0.012 + 1e-8), 0.0, 1.0) ** 0.06, 0.42, 1.0)
+        # Pole caps: never drop keep below a cloudy floor (prevents dark sphere caps).
+        keep = np.maximum(keep, 0.48 * pole_cap_k + 0.38 * (1.0 - pole_cap_k) * pole_keep)
+        outside = np.clip(1.0 - keep, 0.0, 1.0)[..., np.newaxis]
         lu = 0.2126 * canvas[..., 0] + 0.7152 * canvas[..., 1] + 0.0722 * canvas[..., 2]
-        desat = canvas * (1.0 - 0.72 * outside) + lu[..., np.newaxis] * (0.72 * outside)
-        canvas = np.clip(desat * (0.008 + 0.992 * gate[..., np.newaxis]), 0.0, 1.0)
+        desat = canvas * (1.0 - 0.22 * outside) + lu[..., np.newaxis] * (0.22 * outside)
+        canvas = np.clip(desat * keep[..., np.newaxis], 0.0, 1.0)
+        # Grade/screen can bleach hero hue — re-lean toward cloud_emission chroma.
+        from starsky_gen.cloud_complex import (
+            _soft_highlight_rolloff,
+            _tighten_emission_hue,
+            parse_nebula_hero_color,
+        )
+
+        hero_rgb, hero_key = parse_nebula_hero_color(
+            str(getattr(cfg.nebula_tuning, "hero_color", "magenta"))
+        )
+        em = np.clip(np.asarray(cloud_emission, dtype=np.float64), 0.0, 1.0)
+        em_lu = 0.2126 * em[..., 0] + 0.7152 * em[..., 1] + 0.0722 * em[..., 2]
+        em_peak = float(np.percentile(em_lu, 99.0)) + 1e-8
+        em_w = np.clip(em_lu / em_peak, 0.0, 1.0)[..., np.newaxis]
+        # Hero chroma fallback — empty emission cells must not yield a black soft floor.
+        hero_n = np.clip(np.asarray(hero_rgb, dtype=np.float64).reshape(3), 0.0, None)
+        hero_n = hero_n / (float(np.max(hero_n)) + 1e-8)
+        hero_lu = float(0.2126 * hero_n[0] + 0.7152 * hero_n[1] + 0.0722 * hero_n[2]) + 1e-8
+        hero_chroma = (hero_n / hero_lu).reshape(1, 1, 3)
+        em_chroma = em / (em_lu[..., np.newaxis] + 1e-8)
+        em_present = np.clip(em_lu / (em_peak * 0.06 + 1e-8), 0.0, 1.0)[..., np.newaxis]
+        fill_chroma = em_chroma * em_present + hero_chroma * (1.0 - em_present)
+        # Restore soft cloudy fill variation in dim surrounds (remask/grade flatten it).
+        fill_guide = _gauss_void(em_lu, 5.0, periodic_x=wrap_lon_blur_x)
+        fill_p70 = float(np.percentile(fill_guide, 70)) + 1e-8
+        fill_guide = np.clip(fill_guide / fill_p70, 0.0, 1.5)
+        # Mid-scale residual so voids get cloudy lobes, not a smooth pedestal.
+        fill_blur = _gauss_void(em_lu, 11.0, periodic_x=wrap_lon_blur_x)
+        fill_resid = (em_lu - fill_blur) / (float(np.percentile(em_lu, 95)) + 1e-8)
+        fill_cloudiness = np.clip(
+            0.38 + 0.52 * fill_guide + 0.55 * np.clip(fill_resid + 0.35, 0.0, 1.2),
+            0.0,
+            1.6,
+        )
+        # Where emission is empty, invent cloudy structure from ambient guide (not flat).
+        void_cloud = np.clip(0.40 + 0.70 * amb_guide, 0.0, 1.5)
+        fill_cloudiness = np.maximum(
+            fill_cloudiness,
+            void_cloud * (1.0 - np.clip(em_lu / (em_peak * 0.12 + 1e-8), 0.0, 1.0)),
+        )
+        fill_mod = np.clip(0.38 + 0.78 * fill_cloudiness, 0.32, 1.55)
+        dim_w = np.clip(1.0 - np.clip(em_lu / em_peak, 0.0, 1.0) ** 0.55, 0.0, 1.0)
+        dim_w = _gauss_void(dim_w, 3.5, periodic_x=wrap_lon_blur_x)
+        canvas = np.clip(
+            canvas
+            * (
+                (1.0 - 0.82 * dim_w)[..., np.newaxis]
+                + (0.82 * dim_w * fill_mod)[..., np.newaxis]
+            ),
+            0.0,
+            1.0,
+        )
+        # Mild additive cloudy bump in dim zones (multiplicative alone can't unflatten crush).
+        fill_bump = np.clip(fill_mod - float(np.median(fill_mod)), -0.45, 0.55)
+        canvas = np.clip(
+            canvas + fill_chroma * (0.075 * dim_w * fill_bump)[..., np.newaxis],
+            0.0,
+            1.0,
+        )
+        # Seal near-black pockets with faint hue-matched soft fill (esp. pole caps).
+        c_lu = (
+            0.2126 * canvas[..., 0]
+            + 0.7152 * canvas[..., 1]
+            + 0.0722 * canvas[..., 2]
+        )
+        yy_p = np.linspace(-1.0, 1.0, int(c_lu.shape[0]), dtype=np.float64)[:, None]
+        pole_w = np.clip(np.abs(yy_p) ** 1.05, 0.0, 1.0)
+        pole_cap = np.clip((np.abs(yy_p) - 0.64) / 0.36, 0.0, 1.0) ** 0.85
+        # Higher seal threshold on caps — relative-dark pole voids still look empty on a sphere.
+        pocket_thr = 0.12 + 0.08 * pole_cap
+        pocket = np.clip((pocket_thr - c_lu) / (pocket_thr + 1e-8), 0.0, 1.0)
+        pocket = _gauss_void(pocket, 7.0, periodic_x=wrap_lon_blur_x)
+        pocket = np.clip(pocket * (0.50 + 0.55 * pole_w + 0.70 * pole_cap), 0.0, 1.0)
+        soft_amp = 0.11 * (1.0 + 0.65 * pole_cap)
+        soft_floor = fill_chroma * (
+            soft_amp
+            * (0.30 + 0.70 * fill_cloudiness)
+            * (0.60 + 0.45 * pole_w + 0.50 * pole_cap)
+        )[..., np.newaxis]
+        canvas = np.clip(
+            canvas * (1.0 - 0.97 * pocket)[..., np.newaxis]
+            + soft_floor * (0.97 * pocket)[..., np.newaxis],
+            0.0,
+            1.0,
+        )
+        # Hard min floor — stronger on pole caps so sphere ends stay enclosed.
+        floor_keep = 0.85 + 0.15 * pole_cap
+        canvas = np.maximum(canvas, soft_floor * floor_keep[..., np.newaxis])
+        c_lu = (
+            0.2126 * canvas[..., 0]
+            + 0.7152 * canvas[..., 1]
+            + 0.0722 * canvas[..., 2]
+        )
+        restored = fill_chroma * c_lu[..., np.newaxis]
+        # Lean toward emission chroma, but ease off where channel peaks are already
+        # blown — a uniform lean re-flattens structure inside bright red slabs.
+        peak_ch = np.max(canvas, axis=2)
+        peak_ease = np.clip(1.0 - np.clip((peak_ch - 0.72) / 0.22, 0.0, 1.0) * 0.55, 0.45, 1.0)
+        # Local emission contrast keeps lean from painting over filament relief.
+        em_blur = _gauss_void(em_lu, 4.5, periodic_x=wrap_lon_blur_x)
+        em_detail = np.clip(np.abs(em_lu - em_blur) / (float(np.percentile(em_lu, 95)) + 1e-8), 0.0, 1.0)
+        struct_keep = np.clip(0.55 + 0.45 * em_detail, 0.45, 1.0)
+        lean = 0.62 * em_w * peak_ease[..., np.newaxis] * struct_keep[..., np.newaxis]
+        canvas = np.clip(canvas * (1.0 - lean) + restored * lean, 0.0, 1.0)
+        gate_w = np.clip(em_lu / em_peak, 0.0, 1.0)
+        # Shared remask finish (preset red matches custom #FF1818 / blue / magenta).
+        canvas = _tighten_emission_hue(
+            canvas,
+            gate_w,
+            hero_rgb,
+            strength=0.42,
+            sat_cap=0.88,
+            preset_key=hero_key,
+        )
+        # Channel-peak shoulder (shared) — high-R heroes clip R before Rec.709 luma.
+        canvas = _soft_highlight_rolloff(canvas, knee=0.58, strength=0.32)
+        _ = hero_key
         canvas = ensure_hdr(canvas)
+
+    # Nebula scene: hero stars always on top after gas remask — full bright + sharp.
+    if (
+        scene_nebula
+        and cfg.features.stars
+        and cfg.features.hero_star_enabled
+        and hero_records
+        and getattr(cfg.features, "look_target", None) != LookTarget.long_exposure
+        and getattr(cfg.features, "isolate_layer", IsolateLayer.none) in (None, IsolateLayer.none)
+    ):
+        canvas = _composite_nebula_heroes_on_top(
+            canvas,
+            hero_records,
+            rng_post,
+            width=cfg.width,
+            height=cfg.height,
+            spike_max=int(cfg.features.spike_max_count),
+            ghost_strength=float(cfg.features.hero_lens_ghost_strength),
+            periodic_x=wrap_lon_blur_x,
+        )
+        canvas = ensure_hdr(np.clip(canvas, 0.0, 1.0))
 
     # Isolate one layer onto black for compositing plates.
     iso = getattr(cfg.features, "isolate_layer", IsolateLayer.none)

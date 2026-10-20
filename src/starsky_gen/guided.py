@@ -174,7 +174,7 @@ GUIDED_FIELDS: list[GuidedField] = [
         "seed",
         "--seed",
         "Seed",
-        "Base random seed for deterministic batches (blank = random).",
+        "Base seed: N gens use seed…seed+N-1; blank = unique random per gen.",
         "optional_int",
         None,
     ),
@@ -855,7 +855,16 @@ def format_guided_summary(values: dict[str, Any]) -> list[str]:
         proj = "both (--cube)"
 
     seed = values.get("seed")
-    seed_s = _as_label(seed) if seed is not None else "random"
+    n_gen = int(values.get("generations", 1))
+    if seed is not None:
+        seed_i = int(seed)
+        seed_s = (
+            f"{seed_i}–{seed_i + n_gen - 1}"
+            if n_gen > 1
+            else _as_label(seed)
+        )
+    else:
+        seed_s = "unique random per gen" if n_gen > 1 else "random"
     dens = values.get("background_density")
     dens_s = _as_label(dens) if dens is not None else "look default"
 
@@ -877,7 +886,7 @@ def format_guided_summary(values: dict[str, Any]) -> list[str]:
         f"{_as_label(values.get('output_format', 'png'))}",
         f"Output: {_as_label(values.get('output_dir', 'output'))}/"
         f"{_as_label(values.get('output_base_name', 'starsky'))}  ·  "
-        f"{int(values.get('generations', 1))} gen  ·  seed {seed_s}",
+        f"{n_gen} gen  ·  seed {seed_s}",
         f"Look: {_as_label(values.get('look_target', 'cinematic'))}  ·  "
         f"Scene: {scene_s}  ·  Galaxy view: {galaxy_s}",
         f"Layers: bg stars={'on' if values.get('stars', True) else 'off'}  ·  "
@@ -885,9 +894,11 @@ def format_guided_summary(values: dict[str, Any]) -> list[str]:
         f"nebula={'on' if values.get('nebula', True) else 'off'}",
     ]
     if values.get("nebula", True):
+        hero_c = values.get("nebula_hero_color") or values.get("hero_color") or "magenta"
         lines.append(
             f"Nebula: {_as_label(values.get('nebula_mode', 'galaxy_streak'))} / "
             f"{_as_label(values.get('nebula_style', 'balanced'))}  ·  "
+            f"hero color {_as_label(hero_c)}  ·  "
             f"continuity {_as_label(values.get('cloud_continuity', 1.22))}  ·  "
             f"dust {_as_label(values.get('dust_coverage', 0.98))}/"
             f"{_as_label(values.get('dust_strength', 1.14))}"

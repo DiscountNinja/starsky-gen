@@ -10,7 +10,7 @@ from starsky_gen.optical_effects import (
 from starsky_gen.postfx import apply_masked_density_sharpen
 from starsky_gen.postprocess import apply_jpeg_artifacts, smooth_jpeg_highlight_artifacts
 from starsky_gen.tone_map import apply_acescct_cinematic_grade, asinh_linear_stretch_luma
-from starsky_gen.tone_grade import apply_galaxy_scene_tone, mild_disk_asinh_grade
+from starsky_gen.tone_grade import apply_galaxy_scene_tone
 
 
 def test_asinh_midtone_and_toe() -> None:

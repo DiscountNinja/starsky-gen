@@ -1,0 +1,35 @@
+---
+description: After renderer/look changes, run regression tests and a seed spot-check — do not claim visual "improvement" without a human look.
+alwaysApply: true
+---
+
+# Renderer Change Validation
+
+starsky-gen’s product is **photo-realistic, reproducible skyboxes**. Code that changes how plates look or how the pipeline runs must be validated before calling the work done.
+
+## When this applies
+
+Any change that touches render look, sampling, or the hot path, including (non-exhaustive):
+
+- `src/starsky_gen/generator.py`, `nebula.py`, `cloud_complex.py`, `starfield.py`, `psf.py`
+- `galactic_structure.py`, `galactic_band_color.py`, `structure_envelope.py`, `dust_field.py`
+- `tone_grade.py`, `tone_map.py`, `optical_effects.py`, `postfx.py`, `color_science.py`
+- Look presets / scene mode in `config.py`, or CLI flags that change default look
+
+Does **not** apply to pure docs, licensing, CLI defaults plumbing, or progress-label-only edits — unless they also change render math.
+
+## What to run
+
+1. **Targeted pytest** for the area you touched (e.g. `tests/test_scene_mode.py`, morphology/photoreal/band tests). Prefer the smallest set that covers the risk.
+2. **Full `pytest -q`** if the change is broad (generator composition, shared PSF/nebula math, config presets).
+3. **Seed spot-check** when look can change: one small equirect render with a fixed seed (prefer `--seed 42`), modest size (e.g. 1024×512 or smaller), write under `output/` and **visually inspect** the plate (and `--debug-layers` if the change is structural).
+
+## What “good” means
+
+- **Regression:** tests green; plate has no obvious new artifacts (banding, pole shelves, crushed blacks, clipped heroes) vs the intent of the change.
+- **Improvement:** only claim after a human (or the user) compares before/after. Automated metrics (`vista_metrics`, assist scores) are **signals**, not proof of fidelity.
+- Do not invent golden image CI or pixel-diff gates unless the user explicitly asks for that infrastructure.
+
+## How to report
+
+In the reply: which tests ran, the spot-check command/seed/path if used, and a one-line visual verdict (or “no look change expected — tests only”).
