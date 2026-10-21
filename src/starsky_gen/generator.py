@@ -72,6 +72,8 @@ from starsky_gen.optical_effects import (
 from starsky_gen.postfx import (
     apply_depth_of_field,
     apply_directional_motion_blur,
+    apply_global_s_curve,
+    apply_local_contrast,
     apply_masked_density_sharpen,
     apply_tri_scale_bloom,
     depth_map_from_disk,
@@ -510,6 +512,7 @@ def _export_morphology_debug_layers(
     cloud_structure: np.ndarray | None = None,
     cloud_emission: np.ndarray | None = None,
     cloud_dust: np.ndarray | None = None,
+    continuum_gas: np.ndarray | None = None,
 ) -> None:
     if not cfg.features.debug_export_layers and not cfg.features.debug_grayscale_morphology:
         return
@@ -580,14 +583,23 @@ def _export_morphology_debug_layers(
             _save_layer_u8(morphology_grayscale_preview(galactic), out_dir / "morphology_gray.png")
     if ext_paint is not None:
         _save_layer_u8(ext_paint, out_dir / "extinction.png")
+    if continuum_gas is not None:
+        cg = np.asarray(continuum_gas, dtype=np.float64)
+        if cg.ndim == 2:
+            _save_layer_u8(np.clip(cg, 0.0, 1.0), out_dir / "continuum_gas.png")
+        else:
+            lo = float(np.percentile(cg, 5.0))
+            hi = float(np.percentile(cg, 99.2)) + 1e-8
+            _save_layer_rgb(np.clip((cg - lo) / (hi - lo), 0.0, 1.0), out_dir / "continuum_gas.png")
     if band_plan is not None:
         _save_layer_u8(band_plan.lane_weight, out_dir / "band_plan_lane.png")
         _save_layer_u8(band_plan.rift_mask, out_dir / "band_plan_rift.png")
         _save_layer_u8(band_plan.protect_mask, out_dir / "band_plan_protect.png")
         _save_layer_u8(band_plan.shell_weight, out_dir / "band_plan_shell.png")
     star_stack = np.maximum(0.0, stars_bg + stars_mid * 0.92 + stars_fg)
-    star_vis = star_stack / (float(np.percentile(star_stack, 99.5)) + 1e-8)
-    _save_layer_rgb(np.clip(star_vis, 0.0, 1.0), out_dir / "resolved_stars.png")
+    if float(np.max(star_stack)) > 1e-8:
+        star_vis = star_stack / (float(np.percentile(star_stack, 99.5)) + 1e-8)
+        _save_layer_rgb(np.clip(star_vis, 0.0, 1.0), out_dir / "resolved_stars.png")
     if neb_puff_mod is not None:
         _save_layer_u8(
             np.clip(neb_puff_mod, 0.0, 1.0),
@@ -2256,15 +2268,15 @@ def _add_stars_from_catalog(
                         progress_cb(min(frac, 1.0))
                         next_report += 0.05
                 continue
+        # Photoreal stamps whenever mags are present (shared Nebula look off-band too).
         photoreal_paint = (
             cfg.features.photoreal_stars
             and ("phot_mag" in catalog)
             and (
                 population in ("cosmic", "halo")
-                or (
-                    cfg.features.galaxy_view
-                    and (cluster_layer or mid_layer or (not foreground_layer))
-                )
+                or cluster_layer
+                or mid_layer
+                or (not foreground_layer)
             )
         )
         color_name = STAR_COLOR_NAMES[int(catalog["color_idx"][i])]
@@ -2326,8 +2338,14 @@ def _add_stars_from_catalog(
 
         bv_w: float | None = float(catalog["bv"][i]) if has_bv else None
         scene_nebula_paint = cfg.scene_mode == SceneMode.nebula
-        # Nebula mode: no midplane weight — treat the whole sky as the field.
-        plane_w = 0.5 if scene_nebula_paint else float(np.exp(-((catalog["lat"][i] / 0.36) ** 2)))
+        # Photoreal stamps share the nebula chroma/PSF look; plane_w stays lat-weighted for MW.
+        nebula_star_look = scene_nebula_paint or photoreal_paint
+        # Nebula / --no-galaxy-view: no midplane weight — treat the whole sky as the field.
+        # MW band on: keep band-centered weights (placement density + plane_w for gold/core).
+        if scene_nebula_paint or not cfg.features.galaxy_view:
+            plane_w = 0.5
+        else:
+            plane_w = float(np.exp(-((catalog["lat"][i] / 0.36) ** 2)))
         x_n_star = float(xs[i]) / max(cfg.width - 1, 1)
         # Narrow lat gate — shoulders get almost no core_gold paint.
         core_gold = float(
@@ -2513,11 +2531,11 @@ def _add_stars_from_catalog(
             and not foreground_layer
             and not cluster_layer
             and cfg.features.galaxy_view
-            and not scene_nebula_paint
+            and not nebula_star_look
         ):
             plane_d = float(np.exp(-((catalog["lat"][i] / 0.38) ** 2)))
             color = color * (1.0 - 0.22 * plane_d * rng.uniform(0.88, 1.0))
-        if cfg.features.depth and not foreground_layer and not scene_nebula_paint:
+        if cfg.features.depth and not foreground_layer and not nebula_star_look:
             # Dim toward poles so high-latitude voids stay empty/cinematic (MW band).
             pole_u = float(np.clip(abs(float(catalog["lat"][i])) / (0.5 * np.pi), 0.0, 1.0))
             depth_scale = float(np.clip(1.0 - 0.78 * (pole_u**1.35), 0.14, 1.0))
@@ -2527,18 +2545,18 @@ def _add_stars_from_catalog(
             and cfg.features.galaxy_view
             and not cluster_layer
             and not foreground_layer
-            and not scene_nebula_paint
+            and not nebula_star_look
         ):
             plane = float(np.exp(-((catalog["lat"][i] / 0.34) ** 2)))
             cool = np.array([0.98, 0.99, 1.01], dtype=np.float64)
             color = color * ((1.0 - 0.04 * plane) * 1.0 + 0.04 * plane * cool)
-        # Cinematic: warm plane vs cool/white sky (cosmic + low disk_w) — MW band only.
+        # Cinematic: warm plane vs cool/white sky (cosmic + low disk_w) — legacy non-photoreal.
         if (
             getattr(cfg.features, "look_target", None) == LookTarget.cinematic
             and not foreground_layer
             and not cluster_layer
             and cfg.features.galaxy_view
-            and not scene_nebula_paint
+            and not nebula_star_look
         ):
             dw_paint = plane_w
             if disk_w is not None:
@@ -2742,9 +2760,9 @@ def _add_stars_from_catalog(
                 flux_val *= float(dust_vis_arr[i])
             if galactic_structure is not None:
                 flux_val *= 0.88 + 0.12 * galactic_structure.sample_psf_env(yi_px, xi_px)
-            # Soft plane brightness gate (emptier high latitudes) — MW band only.
+            # Soft plane brightness gate (emptier high latitudes) — legacy non-photoreal MW.
             if (
-                not scene_nebula_paint
+                not nebula_star_look
                 and not foreground_layer
                 and not cluster_layer
                 and not is_hero
@@ -2946,8 +2964,8 @@ def _add_stars_from_catalog(
             )
             trail_cos = math.cos(trail_angle_rad) if use_trail and trail_angle_rad is not None else 0.0
             trail_sin = math.sin(trail_angle_rad) if use_trail and trail_angle_rad is not None else 0.0
-            # Color temperature on brighter stars. Nebula: mild random cool/warm (no plane).
-            # MW: cool off-plane, warmer in the plane.
+            # Color temperature on brighter stars. Nebula/photoreal: mild random cool/warm.
+            # Legacy MW: cool off-plane, warmer in the plane.
             glow_spectral = spectral
             if size_name in ("medium", "large") or is_hero:
                 cool = np.array([0.72, 0.88, 1.22], dtype=np.float64)
@@ -2956,7 +2974,7 @@ def _add_stars_from_catalog(
                     warm = np.array([1.28, 0.72, 0.42], dtype=np.float64)
                 elif color_name == "blue":
                     cool = np.array([0.62, 0.84, 1.28], dtype=np.float64)
-                if scene_nebula_paint:
+                if nebula_star_look:
                     plane_u = float(rng.uniform(0.25, 0.75))
                 else:
                     plane_u = float(np.clip(plane_w, 0.0, 1.0))
@@ -2966,7 +2984,7 @@ def _add_stars_from_catalog(
                     mix = float(rng.uniform(0.52, 0.82))
                 elif size_name == "large":
                     mix = float(rng.uniform(0.48, 0.75))
-                if scene_nebula_paint:
+                if nebula_star_look:
                     mix *= 0.72
                 spectral = np.clip(spectral * (1.0 - mix) + spectral * tint * mix, 0.0, None)
                 peak = float(np.max(spectral)) + 1e-8
@@ -3302,7 +3320,8 @@ def render_single(
         )
     # Emission for Nebula Interactive Layer (updated again after nebula_bundle).
     nebula_interact_rgb: np.ndarray | None = cloud_emission
-    if mw_band and cfg.features.stars:
+    # Morphology hosts the MW band even with --no-stars (band-only solo path).
+    if mw_band:
         _pk = _placement_kwargs(cfg.features)
         gen_phase = float(generation_index) * 0.173
         perturb_scale = float(cfg.features.morphology_seed_perturb_scale) * (
@@ -3371,7 +3390,8 @@ def render_single(
         # weight (that paints a grey haze band under black-background star tests).
         disk_w = np.ones((cfg.height, cfg.width), dtype=np.float64)
     else:
-        disk_w = _galactic_disk_weight(cfg.height)
+        # --no-galaxy-view / non-MW: flat host so grade does not invent a cream ribbon.
+        disk_w = np.ones((cfg.height, cfg.width), dtype=np.float64)
     if disk_w is not None:
         _dw0 = np.clip(np.asarray(disk_w, dtype=np.float64), 0.0, 1.0)
         if _dw0.ndim == 1:
@@ -3392,8 +3412,8 @@ def render_single(
     if (
         cfg.features.stars
         and bg_star_s > 1e-9
-        and cfg.features.galaxy_view
         and cfg.features.cosmic_star_enabled
+        and (cfg.features.galaxy_view or not mw_band)
     ):
         _notify_stage("stars cosmic", 0.0)
         from starsky_gen.placement import EQUIRECT_LAT_POLE_MARGIN_FULL_SKY
@@ -3406,7 +3426,11 @@ def render_single(
             density_scale_mult=float(cfg.features.cosmic_star_density_scale) * bg_star_s,
             attach_apparent_mag=cfg.features.photoreal_stars,
             anchor_count=max(0, int(round(float(cfg.features.cosmic_anchor_count) * bg_star_s))),
-            pole_margin=(EQUIRECT_LAT_POLE_MARGIN_FULL_SKY if scene_nebula else None),
+            pole_margin=(
+                EQUIRECT_LAT_POLE_MARGIN_FULL_SKY
+                if (scene_nebula or not cfg.features.galaxy_view)
+                else None
+            ),
         )
         stats_cosmic = _add_stars_from_catalog(
             stars_cosmic,
@@ -3437,13 +3461,16 @@ def render_single(
     if (
         not stars_above_nebula
         and cfg.features.stars
-        and cfg.features.galaxy_view
         and cfg.features.cosmic_star_enabled
+        and (cfg.features.galaxy_view or not mw_band)
         and float(np.max(stars_cosmic)) > 1e-8
     ):
         canvas = _canvas_add_linear(canvas, stars_cosmic, galaxy_hdr=True)
         _notify_stage("stars cosmic", 1.0)
     ism_dom = float(cfg.features.band_ism_dominance) if cfg.features.galaxy_view else 0.0
+    if not cfg.features.nebula_haze:
+        # --no-haze: kill soft ISM lift; structured emission/dust still paint when nebula is on.
+        ism_dom = 0.0
     radiance_unify = float(cfg.features.disk_radiance_unify_strength) if cfg.features.galaxy_view else 0.0
     photon_unify = float(cfg.features.photon_exposure_unify_strength) if cfg.features.galaxy_view else 0.0
     disk_chroma_ref: np.ndarray | None = None
@@ -3467,6 +3494,7 @@ def render_single(
     morph_puff_punch: np.ndarray | None = None
     morph_cont_guide: np.ndarray | None = None
     morph_gas_struct: np.ndarray | None = None
+    no_haze_struct_keep: np.ndarray | None = None
     debug_neb_puff_mod: np.ndarray | None = None
     debug_band_bleed_env: np.ndarray | None = None
     off_band_layer: np.ndarray | None = None
@@ -3476,7 +3504,10 @@ def render_single(
         band_hii_layer = np.zeros((cfg.height, cfg.width, 3), dtype=np.float64)
 
     nebula_bundle: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray] | None = None
-    if cfg.features.nebula and rich_nebula:
+    # MW band gas only under use_mw_band(); nebula scene keeps its own cloud path.
+    # --no-galaxy-view must not paint galaxy_streak as a residual cream ribbon.
+    paint_nebula = bool(cfg.features.nebula and (mw_band or scene_nebula))
+    if paint_nebula and rich_nebula:
         _notify_stage("nebula prep", 0.0)
         if scene_nebula and cloud_emission is not None and cloud_dust is not None:
             # Cloud-complex primary — gated emission is the gas plate (no structure soup remix).
@@ -3530,7 +3561,8 @@ def render_single(
             else 1.0
         )
         phot_kw = dict(
-            attach_apparent_mag=cfg.features.photoreal_stars and cfg.features.galaxy_view,
+            # Photoreal stamps need mags even with --no-galaxy-view (stars-only solo).
+            attach_apparent_mag=bool(cfg.features.photoreal_stars),
             band_star_density_scale=(
                 cfg.features.band_star_density_scale * _gal_frac
                 if cfg.features.galaxy_view
@@ -3544,8 +3576,8 @@ def render_single(
             max_ultra_bright_stars=int(cfg.features.galactic_anchor_star_count),
             **_placement_kwargs(cfg.features),
         )
-        if scene_nebula:
-            # Epic full-sky field: no MW midplane weight — isotropic + mild knots.
+        if scene_nebula or not cfg.features.galaxy_view:
+            # Full-sky / no-band: no MW midplane weight — isotropic + mild knots.
             from starsky_gen.placement import (
                 EQUIRECT_LAT_POLE_MARGIN_FULL_SKY,
             )
@@ -3554,14 +3586,15 @@ def render_single(
             phot_kw["band_curvature_amp"] = 0.0
             phot_kw["band_rotation_deg"] = 0.0
             phot_kw["lon_bulge_amp"] = 0.0
-            phot_kw["cluster_strength"] = 0.22
+            phot_kw["cluster_strength"] = 0.22 if scene_nebula else 0.12
             # Keep a tiny soft margin (avoid 1-row shelf) but no pole vacuum / midplane weight.
             phot_kw["pole_margin"] = EQUIRECT_LAT_POLE_MARGIN_FULL_SKY
             phot_kw["pole_taper_frac"] = 0.0
             phot_kw["pole_lift"] = 0.0
-            phot_kw["band_star_density_scale"] = float(
-                phot_kw.get("band_star_density_scale", 1.0)
-            ) * 1.08
+            if scene_nebula:
+                phot_kw["band_star_density_scale"] = float(
+                    phot_kw.get("band_star_density_scale", 1.0)
+                ) * 1.08
         faint_cull_kw = dict(
             mag_faint_floor=cfg.features.resolved_faint_mag_floor,
             dropout_strength=cfg.features.resolved_faint_dropout,
@@ -3617,7 +3650,8 @@ def render_single(
             density_scale,
             layer="background",
             galactic_band_boost=band_boost,
-            latitude_color_bias=not scene_nebula,
+            # No MW plane gold/cool bias when band is off.
+            latitude_color_bias=bool(cfg.features.galaxy_view and not scene_nebula),
             galactic_structure=galactic,
             **phot_kw,
         )
@@ -3639,11 +3673,11 @@ def render_single(
             attach_stellar_population_to_catalog(
                 cat_bg, galactic, cfg.width, cfg.height, rng_stars_bg
             )
-        if cfg.features.galaxy_view and cfg.features.photoreal_stars:
+        if cfg.features.photoreal_stars:
             cat_bg = cull_faint_resolved_stars(
                 cat_bg,
                 rng_stars_bg,
-                galactic_structure=galactic,
+                galactic_structure=galactic if cfg.features.galaxy_view else None,
                 magnitude_ref_mag=cfg.features.magnitude_ref_mag,
                 width=cfg.width,
                 height=cfg.height,
@@ -3958,13 +3992,29 @@ def render_single(
     # Inherited unresolved luminous field on canvas before dust/extinction (resolved stars later).
     # Morphology-smoothing choke point: continuum blur + speckle σ-pyramid on g×T prior (see
     # galactic_structure.compose_inherited_unresolved_field). preserve_morph_hf when dust-primary.
-    if cfg.features.galaxy_view and galactic is not None:
+    # MW --no-stars: soft continuum body under dust (no grit starfield); stars path unchanged.
+    _deposit_unresolved = bool(
+        cfg.features.galaxy_view
+        and galactic is not None
+        and (cfg.features.stars or (mw_band and not scene_nebula))
+    )
+    if _deposit_unresolved:
         _notify_stage("unresolved field", 0.0)
-        grain_strength = (
-            cfg.features.background_texture_strength
-            * cfg.features.unresolved_background_strength
-            * float(np.clip(0.55 + 0.45 * bg_star_s, 0.25, 1.0))
-        )
+        if cfg.features.stars:
+            grain_strength = (
+                cfg.features.background_texture_strength
+                * cfg.features.unresolved_background_strength
+                * float(np.clip(0.55 + 0.45 * bg_star_s, 0.25, 1.0))
+            )
+            deposit_primary = bool(cfg.features.unresolved_deposit_primary)
+        else:
+            # Band-only: luminous substrate for translucent dust, not sparse grit.
+            grain_strength = (
+                cfg.features.background_texture_strength
+                * cfg.features.unresolved_background_strength
+                * 0.28
+            )
+            deposit_primary = False
         unresolved_rgb = unresolved_speckle_rgb(
             warmth=float(cfg.features.unresolved_spectral_warmth) * radiance_unify,
             disk_chroma=disk_chroma_ref,
@@ -3975,7 +4025,7 @@ def render_single(
             galactic,
             texture_strength=grain_strength,
             periodic_x=wrap_lon_blur_x,
-            deposit_primary=cfg.features.unresolved_deposit_primary,
+            deposit_primary=deposit_primary,
             unresolved_rgb=unresolved_rgb,
             preserve_morph_hf=bool(cfg.features.morphology_dust_primary),
         )
@@ -3986,7 +4036,7 @@ def render_single(
     ext_paint_for_fg: np.ndarray | None = None
     dark_rift_mask: np.ndarray | None = None
     band_plan: BandPlan | None = None
-    if cfg.features.nebula:
+    if paint_nebula:
         _notify_stage("nebula clouds/dust", 0.08)
         if nebula_bundle is not None:
             neb, neb_emit, dust_occlusion, lane_ext, extinction = nebula_bundle
@@ -4177,14 +4227,19 @@ def render_single(
                 void_floor=vf_rift,
             )
         # Soft extinction shoulders: transmission polarity (low = more attenuation) preserved.
+        # MW band: keep sharper lanes (less blur mix) so dust rivers survive the continuum.
         if ext_paint is not None and rich_nebula:
             if scene_nebula:
                 from starsky_gen.cloud_complex import _gauss_float as _gauss_ext
 
                 _ext_soft = _gauss_ext(ext_paint, 1.2, periodic_x=wrap_lon_blur_x)
+                ext_paint = np.clip(0.62 * ext_paint + 0.38 * _ext_soft, 0.04, 1.0)
+            elif mw_band:
+                _ext_soft = _blur_separable_xy(ext_paint, passes=1, periodic_x=wrap_lon_blur_x)
+                ext_paint = np.clip(0.82 * ext_paint + 0.18 * _ext_soft, 0.04, 1.0)
             else:
                 _ext_soft = _blur_separable_xy(ext_paint, passes=2, periodic_x=wrap_lon_blur_x)
-            ext_paint = np.clip(0.62 * ext_paint + 0.38 * _ext_soft, 0.04, 1.0)
+                ext_paint = np.clip(0.62 * ext_paint + 0.38 * _ext_soft, 0.04, 1.0)
         ext_paint_for_fg = ext_paint
         if (
             mw_band
@@ -4354,8 +4409,9 @@ def render_single(
         )
         fill_suppress = 1.0
         if dust_primary:
-            av_scale *= float(cfg.features.morphology_extinction_av_scale) * 0.58
-            fill_suppress = float(cfg.features.morphology_extinction_fill_suppress) * 0.88
+            # Morph extinction dims lanes without obliterating continuum midtones.
+            av_scale *= float(cfg.features.morphology_extinction_av_scale) * 0.95
+            fill_suppress = float(cfg.features.morphology_extinction_fill_suppress) * 0.70
         elif scene_nebula:
             # Cloud-complex: extinction darkens lanes; skip MW dust backlight soup fill.
             fill_suppress = 0.12
@@ -4446,18 +4502,39 @@ def render_single(
                 if core_void_mask is not None
                 else 1.0
             )
-            # Midplane gold spine only (shoulders already razor-gated in morph layers).
-            canvas = np.maximum(
-                0.0,
-                canvas
-                + morph_ism_layers.gold_emit_rgb * body_s * 0.032 * gold_gate * core_v
-                + morph_ism_layers.white_rgb * body_s * 0.08 * gate3 * core_v,
-            )
+            # Soft under-layer: bright continuum so dust can veil light (photo-like clouds).
+            if cfg.features.nebula_haze:
+                # MW needs a strong luminous body — weak deposit left dark silhouette holes.
+                _white_s = 0.18 if mw_band else 0.08
+                _gold_s = 0.22 if mw_band else 0.032
+                canvas = np.maximum(
+                    0.0,
+                    canvas
+                    + morph_ism_layers.gold_emit_rgb * body_s * _gold_s * gold_gate * core_v
+                    + morph_ism_layers.white_rgb * body_s * _white_s * gate3 * core_v,
+                )
             absorb_l = np.clip(np.max(morph_ism_layers.absorption_rgb, axis=2), 0.0, 1.0)
+            # Light translucent dust dim — heavy absorb was cutting black into clouds.
+            _abs_s = 0.14 if mw_band else 0.14
             canvas = np.maximum(
                 0.0,
-                canvas * (1.0 - (absorb_l * 0.14 * ism_gate)[..., np.newaxis]),
+                canvas * (1.0 - (absorb_l * _abs_s * ism_gate)[..., np.newaxis]),
             )
+            if mw_band and ext_paint is not None:
+                # Mild early veil only — preserve luminous cloud body under dust.
+                _ext_early = np.clip(np.asarray(ext_paint, dtype=np.float64), 0.0, 1.0)
+                _ext_early = _blur_separable_xy(_ext_early, passes=2, periodic_x=wrap_lon_blur_x)
+                _dw_e0 = (
+                    np.clip(np.asarray(disk_w, dtype=np.float64), 0.0, 1.0)
+                    if disk_w is not None
+                    else np.ones_like(_ext_early)
+                )
+                if _dw_e0.ndim == 1:
+                    _dw_e0 = _dw_e0[:, None]
+                _early = np.clip(0.55 + 0.45 * np.power(_ext_early, 0.80), 0.42, 1.0)
+                _early = np.clip(_early * (0.55 + 0.45 * _dw_e0**0.70), 0.42, 1.0)
+                _darkened = canvas * _early[..., np.newaxis]
+                canvas = np.clip(canvas * 0.55 + _darkened * 0.45, 0.0, None)
             if off_band_layer is not None:
                 hii_seed = nebula_master_seed ^ 0xE011C0DE
                 hii_off = _build_off_band_hii_layer(
@@ -4518,6 +4595,14 @@ def render_single(
             _dw_vis = _dw_vis[:, None]
         if _dw_vis.shape != (cfg.height, cfg.width):
             _dw_vis = np.broadcast_to(_dw_vis, (cfg.height, cfg.width))
+        # Prefer bleed envelope so gas fills a taller fluffy plane, not a razor disk.
+        if band_bleed_env is not None:
+            _bbe = np.clip(np.asarray(band_bleed_env, dtype=np.float64), 0.0, 1.0)
+            if _bbe.ndim == 1:
+                _bbe = _bbe[:, None]
+            if _bbe.shape != _dw_vis.shape:
+                _bbe = np.broadcast_to(_bbe, _dw_vis.shape)
+            _dw_vis = np.clip(np.maximum(_dw_vis, _bbe * 0.88), 0.0, 1.0)
         # Softer vertical gate so gas fills the band envelope, not a razor-thin row.
         # Nebula scene: cloud_emission already has soft base + hero — do not re-crush
         # lows with a peak-weighted gate (that erased the underlayer to black voids).
@@ -4530,9 +4615,12 @@ def render_single(
             )
             gas_visibility = np.clip(gas_visibility * density_gate, 0.0, 1.0)
         else:
-            density_gate = np.clip(_dw_vis**1.38, 0.0, 1.0)
+            # Soft vertical host — hard dw**1.08 * neb**0.48 zeroed cloud pockets to black.
+            density_gate = np.clip(0.35 + 0.65 * _dw_vis**0.75, 0.0, 1.0)
             gas_visibility = np.clip(
-                (neb_luma**0.48) * (0.82 + 0.62 * neb_peaks) * density_gate,
+                (0.28 + 0.72 * neb_luma**0.35)
+                * (0.70 + 0.30 * neb_peaks)
+                * density_gate,
                 0.0,
                 1.0,
             )
@@ -4554,8 +4642,9 @@ def render_single(
             )
             from starsky_gen.dust_field import attenuate_row_comb
 
+            # Light row-comb — heavy strength turned billowy morph into horizontal shelves.
             morph_gas_struct = attenuate_row_comb(
-                morph_gas_struct, disk_w, strength=0.55
+                morph_gas_struct, disk_w, strength=0.16
             )
             morph_cont_guide = _morphology_continuum_guide(
                 morph_gas_struct,
@@ -4605,8 +4694,10 @@ def render_single(
             if dust_primary and galactic is not None:
                 sf = np.clip(galactic.star_formation, 0.0, 1.0)
                 void_w = np.clip(galactic.void_mask, 0.0, 1.0)
+                # Void was covering ~25% of plate and punching cloud holes (debug void_frac_gt05).
+                _void_k = 0.06 if mw_band else 0.42
                 gas_presence = np.clip(
-                    0.28 + 0.72 * sf * (1.0 - 0.42 * void_w),
+                    0.62 + 0.38 * sf * (1.0 - _void_k * void_w),
                     0.0,
                     1.0,
                 )
@@ -4615,11 +4706,11 @@ def render_single(
                     if wisp_gate is not None:
                         host = np.clip(np.maximum(host, wisp_gate * 0.78), 0.0, 1.0)
                     gas_presence = np.clip(
-                        gas_presence * (0.54 + 0.46 * host), 0.0, 1.0
+                        gas_presence * (0.72 + 0.28 * host), 0.0, 1.0
                     )
                 elif disk_w is not None:
                     dw = np.clip(disk_w, 0.0, 1.0)
-                    gas_presence = np.clip(gas_presence * (0.38 + 0.62 * dw), 0.0, 1.0)
+                    gas_presence = np.clip(gas_presence * (0.55 + 0.45 * dw), 0.0, 1.0)
                 elif wisp_gate is not None:
                     gas_presence = np.clip(gas_presence * wisp_gate, 0.0, 1.0)
                 if galactic is not None:
@@ -4648,11 +4739,12 @@ def render_single(
                     from starsky_gen.structure_envelope import build_fine_puff_field
 
                     morph_gas_s = neb_rad_scale * (0.98 + 0.36 * ism_dom)
-                    struct_g = (
-                        morph_gas_struct
-                        if morph_gas_struct is not None
-                        else np.clip(morph_ism_luma, 0.0, 1.0)
-                    )
+                    # Floor struct gate so dim morph HF modulates body instead of zeroing it.
+                    if morph_gas_struct is not None:
+                        _sg0 = np.clip(morph_gas_struct, 0.0, 1.0)
+                        struct_g = np.clip(0.58 + 0.42 * _sg0, 0.0, 1.0)
+                    else:
+                        struct_g = np.clip(0.58 + 0.42 * morph_ism_luma, 0.0, 1.0)
                     puff_gas = build_fine_puff_field(
                         np.random.default_rng(int(seed) + generation_index * 8803 + 0x50FF),
                         cfg.height,
@@ -4663,8 +4755,8 @@ def render_single(
                     )
                     from starsky_gen.dust_field import attenuate_row_comb
 
-                    puff_gas = attenuate_row_comb(puff_gas, disk_w, strength=0.72)
-                    puff_mod = np.clip(0.52 + 0.38 * puff_gas**1.04, 0.0, 1.25)
+                    puff_gas = attenuate_row_comb(puff_gas, disk_w, strength=0.22)
+                    puff_mod = np.clip(0.62 + 0.38 * puff_gas**0.92, 0.0, 1.25)
                     debug_neb_puff_mod = puff_mod
                     morph_lu = np.clip(morph_ism_luma, 0.0, 1.0)
                     morph_mix = (
@@ -4705,7 +4797,7 @@ def render_single(
                     )
                     if morph_gas_struct is not None:
                         proc_tail = proc_tail * (
-                            0.42 + 0.58 * morph_gas_struct[..., np.newaxis]
+                            0.62 + 0.38 * morph_gas_struct[..., np.newaxis]
                         )
                     neb_gas = morph_mix * morph_w * 0.92 + proc_tail * 0.26
                 else:
@@ -4716,82 +4808,214 @@ def render_single(
                     )
                     if morph_gas_struct is not None:
                         neb_gas = neb_gas * (
-                            0.35 + 0.65 * morph_gas_struct[..., np.newaxis]
+                            0.55 + 0.45 * morph_gas_struct[..., np.newaxis]
                         )
                 _neb_gas_gate = (
                     wisp_gate if wisp_gate is not None else plane_gate
                 )
                 if _neb_gas_gate is not None:
                     neb_gas = neb_gas * _neb_gas_gate[..., np.newaxis]
-                gas_visibility = np.clip(
-                    gas_visibility * gas_presence * gas_mask,
-                    0.0,
-                    1.0,
-                )
-                gas_rel_vis = band_relative_clearance(
-                    ext_paint, disk_w, min_clear=0.30, power=0.85
-                )
-                host_vis = (
-                    np.clip(soft_band_env, 0.0, 1.0)
-                    if soft_band_env is not None
-                    else np.clip(disk_w, 0.0, 1.0)
-                )
-                _plane_vis = np.clip(np.asarray(disk_w, dtype=np.float64), 0.0, 1.0) ** 1.35
-                gas_visibility = np.clip(
-                    np.maximum(
-                        gas_visibility,
-                        (0.32 + 0.48 * gas_rel_vis)
-                        * gas_presence
-                        * host_vis
-                        * np.clip(_plane_vis * 3.2, 0.08, 1.0),
-                    ),
-                    0.0,
-                    1.0,
-                )
-                neb_gas = neb_gas * (0.94 + 0.08 * morph_gas_scale)
-                if morph_gas_struct is not None and galactic is not None:
-                    puff_clear = np.clip(
-                        (1.0 - galactic.dust_absorption_morph) ** 1.02, 0.06, 1.0
+                # Raw neb_gas mean ~0.06 left canvas ~0.02 after vis — lift MW cloud body.
+                if mw_band:
+                    neb_gas = np.clip(neb_gas * 3.8, 0.0, None)
+                    # In-band continuum floor — zeroish neb_gas read as opaque black cutouts.
+                    _host_f = (
+                        np.clip(soft_band_env, 0.0, 1.0)
+                        if soft_band_env is not None
+                        else (
+                            np.clip(disk_w, 0.0, 1.0)
+                            if disk_w is not None
+                            else None
+                        )
                     )
-                    puff_vis = np.clip(
-                        morph_gas_struct * 0.72 + puff_clear * 0.48, 0.0, 1.0
-                    )
-                    puff_boost = puff_vis * gas_presence * 1.05
+                    if _host_f is not None:
+                        if _host_f.ndim == 1:
+                            _host_f = _host_f[:, None]
+                        _warm_f = np.array([0.92, 0.78, 0.58], dtype=np.float64)
+                        _floor = (_host_f * 0.085)[..., np.newaxis] * _warm_f.reshape(
+                            1, 1, 3
+                        )
+                        neb_gas = np.maximum(neb_gas, _floor)
+                # MW: keep visibility open so morph clouds composite (was ~0.01 canvas).
+                if mw_band:
                     gas_visibility = np.clip(
-                        np.maximum(gas_visibility, puff_boost),
+                        np.maximum(
+                            gas_visibility * (0.82 + 0.18 * gas_presence),
+                            density_gate * (0.48 + 0.42 * gas_presence),
+                        )
+                        * np.clip(0.85 + 0.15 * gas_mask, 0.72, 1.0),
                         0.0,
                         1.0,
                     )
-                elif morph_ism_luma is not None:
+                    # Irregular cloudy silhouette — smooth soft_env lobes read as black cutouts.
+                    from starsky_gen.structure_envelope import build_fine_puff_field
+                    from starsky_gen.procedural_noise import gaussian_blur_pil as _gauss_edge
+
+                    _edge_rng = np.random.default_rng(
+                        int(seed) + generation_index * 9109 + 0xED6E
+                    )
+                    _edge_puff = build_fine_puff_field(
+                        _edge_rng,
+                        cfg.height,
+                        cfg.width,
+                        periodic_x=wrap_lon_blur_x,
+                        strength=1.0,
+                        center_boost=0.20,
+                    )
+                    _sc = float(max(cfg.height, cfg.width))
+                    _edge_puff = _gauss_edge(
+                        _edge_puff,
+                        float(np.clip(_sc * 0.014, 1.5, 12.0)),
+                        periodic_x=wrap_lon_blur_x,
+                    )
+                    _host_e = (
+                        np.clip(soft_band_env, 0.0, 1.0)
+                        if soft_band_env is not None
+                        else np.clip(density_gate, 0.0, 1.0)
+                    )
+                    # Rim band: wisps bulge outward where puff is high.
+                    _rim = np.clip(_host_e * (1.15 - _host_e), 0.0, 1.0)
+                    _wisp_vis = np.clip(
+                        _rim * (0.35 + 0.75 * _edge_puff) * (0.55 + 0.45 * gas_presence),
+                        0.0,
+                        1.0,
+                    )
+                    gas_visibility = np.clip(
+                        np.maximum(gas_visibility, _wisp_vis * 0.85), 0.0, 1.0
+                    )
+                    # Soft puff tendrils into neb body so silhouette is cloudy, not elliptical.
+                    _warm_w = np.array([0.78, 0.68, 0.52], dtype=np.float64)
+                    _tendril = (
+                        (_wisp_vis * 0.12)[..., np.newaxis] * _warm_w.reshape(1, 1, 3)
+                    )
+                    neb_gas = np.maximum(neb_gas, _tendril)
+                else:
+                    gas_visibility = np.clip(
+                        gas_visibility * gas_presence * gas_mask,
+                        0.0,
+                        1.0,
+                    )
+                # Soft continuum floors wash lanes; MW keeps a weak under-glow via
+                # shoulder ambient later — do not refill dark rivers here.
+                if cfg.features.nebula_haze and not mw_band:
+                    gas_rel_vis = band_relative_clearance(
+                        ext_paint, disk_w, min_clear=0.30, power=0.85
+                    )
+                    host_vis = (
+                        np.clip(soft_band_env, 0.0, 1.0)
+                        if soft_band_env is not None
+                        else np.clip(disk_w, 0.0, 1.0)
+                    )
+                    _plane_vis = np.clip(np.asarray(disk_w, dtype=np.float64), 0.0, 1.0) ** 1.35
                     gas_visibility = np.clip(
                         np.maximum(
                             gas_visibility,
-                            morph_ism_luma * 0.52 * gas_presence,
+                            (0.32 + 0.48 * gas_rel_vis)
+                            * gas_presence
+                            * host_vis
+                            * np.clip(_plane_vis * 3.2, 0.08, 1.0),
                         ),
                         0.0,
                         1.0,
                     )
+                elif cfg.features.nebula_haze and mw_band:
+                    # Mild clearance lift only where transmission is already open.
+                    gas_rel_vis = band_relative_clearance(
+                        ext_paint, disk_w, min_clear=0.42, power=1.05
+                    )
+                    gas_visibility = np.clip(
+                        gas_visibility * (0.72 + 0.28 * gas_rel_vis),
+                        0.0,
+                        1.0,
+                    )
+                neb_gas = neb_gas * (0.94 + 0.08 * morph_gas_scale)
+                if mw_band and ext_paint is not None:
+                    # Dust rivers into gas — keep midtones, darken lanes enough to read.
+                    _ext_c = np.clip(np.asarray(ext_paint, dtype=np.float64), 0.0, 1.0)
+                    _dw_c = (
+                        np.clip(np.asarray(disk_w, dtype=np.float64), 0.0, 1.0)
+                        if disk_w is not None
+                        else np.ones_like(_ext_c)
+                    )
+                    if _dw_c.ndim == 1:
+                        _dw_c = _dw_c[:, None]
+                    # Soft translucent carve — dust modulates clouds, does not delete them.
+                    _ext_c = _blur_separable_xy(_ext_c, passes=2, periodic_x=wrap_lon_blur_x)
+                    _carve = np.clip(0.48 + 0.52 * np.power(_ext_c, 0.80), 0.40, 1.0)
+                    if galactic is not None:
+                        _dust_a = np.clip(galactic.dust_absorption_morph, 0.0, 1.0)
+                        _dust_a = _blur_separable_xy(_dust_a, passes=2, periodic_x=wrap_lon_blur_x)
+                        _carve = np.clip(_carve * (1.0 - 0.14 * _dust_a**0.70), 0.40, 1.0)
+                    _carve = np.clip(_carve * (0.50 + 0.50 * _dw_c**0.70), 0.40, 1.0)
+                    _carve = _blur_separable_xy(_carve, passes=2, periodic_x=wrap_lon_blur_x)
+                    neb_gas = neb_gas * _carve[..., np.newaxis]
+                    # Soft morph reinject (no maximum punch that jags carve edges).
+                    if morph_gas_struct is not None:
+                        _sg = np.clip(np.asarray(morph_gas_struct, dtype=np.float64), 0.0, 1.0)
+                        _sg_b = _blur_separable_xy(_sg, passes=2, periodic_x=wrap_lon_blur_x)
+                        _sg_d = np.clip(
+                            (_sg - _sg_b * 0.85) / (float(np.percentile(_sg, 95)) + 1e-8),
+                            -0.35,
+                            1.0,
+                        )
+                        _sg_d = _blur_separable_xy(_sg_d, passes=1, periodic_x=wrap_lon_blur_x)
+                        _boost = np.clip(1.0 + 0.28 * _sg_d * _dw_c, 0.0, 1.25)
+                        neb_gas = np.maximum(0.0, neb_gas * _boost[..., np.newaxis])
+                if cfg.features.nebula_haze and not mw_band:
+                    if morph_gas_struct is not None and galactic is not None:
+                        puff_clear = np.clip(
+                            (1.0 - galactic.dust_absorption_morph) ** 1.02, 0.06, 1.0
+                        )
+                        puff_vis = np.clip(
+                            morph_gas_struct * 0.72 + puff_clear * 0.48, 0.0, 1.0
+                        )
+                        puff_boost = puff_vis * gas_presence * 1.05
+                        gas_visibility = np.clip(
+                            np.maximum(gas_visibility, puff_boost),
+                            0.0,
+                            1.0,
+                        )
+                    elif morph_ism_luma is not None:
+                        gas_visibility = np.clip(
+                            np.maximum(
+                                gas_visibility,
+                                morph_ism_luma * 0.52 * gas_presence,
+                            ),
+                            0.0,
+                            1.0,
+                        )
             elif dust_primary:
+                # Soft dust carve on gas (dark lanes, keep midtones).
                 neb_gas *= morph_gas_scale * np.clip(
-                    0.55 + 0.45 * ext_paint[..., None], 0.55, 1.0
+                    0.28 + 0.72 * np.power(np.clip(ext_paint, 0.0, 1.0), 1.18)[..., None],
+                    0.18,
+                    1.0,
                 )
                 gas_visibility = np.clip(gas_visibility * gas_mask, 0.0, 1.0)
             else:
                 neb_gas *= 1.08 * (0.90 + 0.10 * ext_paint[..., None])
         if cfg.features.galaxy_view and disk_w is not None and cfg.nebula_mode == NebulaMode.galaxy_streak:
+            # Soft comb — strong column/row atten made barcode shelves, not clouds.
             neb_gas = attenuate_rgb_column_comb(
                 neb_gas,
                 disk_w,
-                strength=0.78 if dust_primary else 0.58,
+                strength=0.24 if dust_primary else 0.40,
                 periodic_x=wrap_lon_blur_x,
             )
             neb_gas = attenuate_rgb_row_comb(
                 neb_gas,
                 disk_w,
-                strength=0.72 if dust_primary else 0.55,
+                strength=0.22 if dust_primary else 0.35,
             )
-            _plane_ramp = np.clip(np.asarray(disk_w, dtype=np.float64), 0.0, 1.0) ** 0.68
-            _sky_neb = np.clip(0.18 + 0.82 * _plane_ramp, 0.12, 1.0)
+            # Soft vertical host — hard plane**0.68 crushed cloud shoulders to black.
+            _plane_ramp = np.clip(np.asarray(disk_w, dtype=np.float64), 0.0, 1.0) ** 0.45
+            _sky_neb = np.clip(0.42 + 0.58 * _plane_ramp, 0.35, 1.0)
+            if band_bleed_env is not None:
+                _bbe_n = np.clip(np.asarray(band_bleed_env, dtype=np.float64), 0.0, 1.0)
+                if _bbe_n.ndim == 1:
+                    _bbe_n = _bbe_n[:, None]
+                if _bbe_n.shape == _sky_neb.shape:
+                    _sky_neb = np.clip(np.maximum(_sky_neb, _bbe_n * 0.78), 0.35, 1.0)
             neb_gas = neb_gas * _sky_neb[..., np.newaxis]
             gas_visibility = gas_visibility * _sky_neb
             chroma_tgt = disk_chroma_ref
@@ -4799,13 +5023,55 @@ def render_single(
                 chroma_tgt = disk_chroma_from_star_layer(
                     np.maximum(0.0, stars_bg + stars_mid * 0.85), disk_w
                 )
-            if chroma_tgt is not None:
+            if chroma_tgt is not None and cfg.features.nebula_haze and not mw_band:
                 neb_gas = soften_diffuse_chroma_toward(
                     neb_gas,
                     disk_w,
                     chroma_tgt,
                     strength=0.58 if dust_primary else 0.32,
                 )
+        if (
+            not cfg.features.nebula_haze
+            and cfg.nebula_mode == NebulaMode.galaxy_streak
+            and cfg.features.galaxy_view
+        ):
+            # --no-haze: kill soft low-frequency wash; keep cloudy morph / dust lanes readable.
+            gas_lu = rec709_luma(np.maximum(neb_gas, 0.0))
+            soft_lu = _blur_separable_xy(gas_lu, passes=5, periodic_x=wrap_lon_blur_x)
+            # Subtract soft body; retain mid-scale cloud structure (not salt-pepper HF only).
+            mid_lu = _blur_separable_xy(gas_lu, passes=1, periodic_x=wrap_lon_blur_x)
+            struct_detail = np.clip(mid_lu - soft_lu * 0.88, 0.0, None)
+            struct = np.ones((cfg.height, cfg.width), dtype=np.float64)
+            if morph_gas_struct is not None:
+                struct = np.clip(morph_gas_struct, 0.0, 1.0)
+            elif morph_ism_luma is not None:
+                struct = np.clip(morph_ism_luma, 0.0, 1.0)
+            if galactic is not None:
+                dust_open = np.clip(
+                    1.0 - galactic.dust_absorption_morph * 0.82, 0.12, 1.0
+                ) ** 0.92
+                struct = np.clip(struct * (0.42 + 0.58 * dust_open), 0.0, 1.0)
+            struct_gate = np.clip(struct**1.15, 0.0, 1.0)
+            detail_w = np.clip(
+                struct_detail / (float(np.percentile(struct_detail, 98.0)) + 1e-6),
+                0.0,
+                1.0,
+            )
+            keep = np.clip(0.12 + 0.88 * np.maximum(struct_gate, detail_w**0.85), 0.0, 1.0)
+            if galactic is not None:
+                lane = np.clip(galactic.dust_absorption_morph, 0.0, 1.0)
+                keep = np.clip(keep * (1.0 - 0.48 * lane**1.05), 0.0, 1.0)
+            # Soft pedestal gone; structured gas remains at moderate amplitude.
+            neb_gas = neb_gas * keep[..., np.newaxis] * 0.55
+            gas_visibility = np.clip(gas_visibility * (0.22 + 0.78 * struct_gate), 0.0, 1.0)
+            vis = np.clip(gas_visibility, 0.0, 1.0)
+            plate_lu = rec709_luma(np.maximum(neb_gas, 0.0)) * vis
+            peak_pl = float(np.percentile(plate_lu, 99.5)) + 1e-8
+            no_haze_struct_keep = np.clip(
+                np.maximum(keep * vis, plate_lu / peak_pl) ** 0.78,
+                0.0,
+                1.0,
+            )
         gas_occ = float(cfg.features.unresolved_gas_occlusion)
         if gas_occ > 1e-6 and cfg.features.galaxy_view:
             canvas = _mute_speckle_under_nebula(
@@ -4820,19 +5086,158 @@ def render_single(
                 ),
             )
         # Plate for --isolate-layer nebula_gas (pre-composite).
+        # Absolute asinh — per-plate percentile stretch made haze on/off look identical.
         _ng = np.maximum(0.0, neb_gas * np.clip(gas_visibility, 0.0, 1.0)[..., np.newaxis])
-        _ng_peak = float(np.percentile(_ng, 99.5)) if _ng.size else 1.0
-        isolate_neb_plate = np.clip(_ng / max(_ng_peak, 1e-6), 0.0, 1.0)
+        isolate_neb_plate = np.clip(np.arcsinh(_ng * 22.0) / np.arcsinh(1.0), 0.0, 1.0)
         canvas = composite_add_gas(canvas, neb_gas, visibility=gas_visibility)
-        if mw_band and cfg.nebula_mode == NebulaMode.galaxy_streak and disk_w is not None:
+        if (
+            mw_band
+            and cfg.nebula_mode == NebulaMode.galaxy_streak
+            and disk_w is not None
+            and cfg.features.nebula_haze
+        ):
+            # --- Dust-over-continuum sandwich (photo MW clouds) ---
+            # Bright continuous body first; translucent puff dust multiplies on top.
+            from starsky_gen.structure_envelope import build_fine_puff_field
+            from starsky_gen.procedural_noise import gaussian_blur_pil as _gauss_cloud
+
             _dw_s = np.clip(np.asarray(disk_w, dtype=np.float64), 0.0, 1.0)
-            _shoulder = np.clip(_dw_s**0.62, 0.0, 1.0)
+            _host = (
+                np.clip(soft_band_env, 0.0, 1.0)
+                if soft_band_env is not None
+                else np.clip(_dw_s**0.55, 0.0, 1.0)
+            )
+            if band_bleed_env is not None:
+                _bbe_c = np.clip(np.asarray(band_bleed_env, dtype=np.float64), 0.0, 1.0)
+                if _bbe_c.ndim == 1:
+                    _bbe_c = _bbe_c[:, None]
+                if _bbe_c.shape == _host.shape:
+                    _host = np.clip(np.maximum(_host, _bbe_c * 0.92), 0.0, 1.0)
+            # Continuous latitude tube — soft_env waves were leaving black silhouette bites.
+            _yy_t = np.linspace(-1.0, 1.0, cfg.height, dtype=np.float64)[:, None]
+            _sig_t = float(np.clip(cfg.features.band_lat_sigma * 1.85, 0.18, 0.42))
+            _tube = np.exp(-((_yy_t / _sig_t) ** 2))
+            _tube = np.broadcast_to(_tube, _host.shape).astype(np.float64)
+            _host = np.clip(np.maximum(_host, _tube * 0.88), 0.0, 1.0)
+            _sc = float(max(cfg.height, cfg.width))
+            _host = _gauss_cloud(
+                _host, float(np.clip(_sc * 0.018, 2.0, 16.0)), periodic_x=wrap_lon_blur_x
+            )
+            _cont_rgb = np.array([0.68, 0.58, 0.44], dtype=np.float64)
+            _continuum = (_host * 0.55)[..., np.newaxis] * _cont_rgb.reshape(1, 1, 3)
+            if morph_gas_struct is not None:
+                _mg_c = np.clip(np.asarray(morph_gas_struct, dtype=np.float64), 0.0, 1.0)
+                # Mild clump modulation — never carve continuum to empty.
+                _continuum = _continuum * (0.82 + 0.28 * _mg_c[..., np.newaxis])
+            canvas = np.maximum(canvas, _continuum)
+            # Multi-scale billowy dust clouds (not flat grain sheet).
+            _dust_rng = np.random.default_rng(
+                int(seed) + generation_index * 7723 + 0xD05F
+            )
+            _puff_lo = build_fine_puff_field(
+                _dust_rng,
+                cfg.height,
+                cfg.width,
+                periodic_x=wrap_lon_blur_x,
+                strength=1.0,
+                center_boost=0.22,
+            )
+            _puff_lo = _gauss_cloud(
+                _puff_lo, float(np.clip(_sc * 0.028, 3.0, 22.0)), periodic_x=wrap_lon_blur_x
+            )
+            _rng_m = np.random.default_rng(int(_dust_rng.integers(0, 2**31 - 1)) ^ 0xC10D)
+            _puff_mid = build_fine_puff_field(
+                _rng_m,
+                cfg.height,
+                cfg.width,
+                periodic_x=wrap_lon_blur_x,
+                strength=1.0,
+                center_boost=0.18,
+            )
+            _puff_mid = _gauss_cloud(
+                _puff_mid, float(np.clip(_sc * 0.012, 1.5, 12.0)), periodic_x=wrap_lon_blur_x
+            )
+            _rng_h = np.random.default_rng(int(_dust_rng.integers(0, 2**31 - 1)) ^ 0xF155)
+            _puff_hi = build_fine_puff_field(
+                _rng_h,
+                cfg.height,
+                cfg.width,
+                periodic_x=wrap_lon_blur_x,
+                strength=0.9,
+                center_boost=0.12,
+            )
+            _puff_hi = _gauss_cloud(
+                _puff_hi, float(np.clip(_sc * 0.005, 0.8, 5.0)), periodic_x=wrap_lon_blur_x
+            )
+            _dust_a = (
+                np.clip(galactic.dust_absorption_morph, 0.0, 1.0)
+                if galactic is not None
+                else np.zeros_like(_host)
+            )
+            _dust_a = _gauss_cloud(
+                _dust_a, float(np.clip(_sc * 0.010, 1.2, 10.0)), periodic_x=wrap_lon_blur_x
+            )
+            # Soft cloud body: mid/hi-dominant so clumps read (lo alone washes flat).
+            _cloud_body = np.clip(
+                _puff_lo * 0.28
+                + _puff_mid * 0.40
+                + _puff_hi * 0.24
+                + _dust_a * 0.22,
+                0.0,
+                1.0,
+            )
+            # Soft peak islands — dust forms discrete cloudy masses with feathered rims.
+            _body_b = _gauss_cloud(
+                _cloud_body, float(np.clip(_sc * 0.014, 1.8, 12.0)), periodic_x=wrap_lon_blur_x
+            )
+            _thr = float(np.percentile(_cloud_body[_host > 0.30], 48.0)) if np.any(
+                _host > 0.30
+            ) else 0.45
+            _islands = np.clip((_cloud_body - _thr) / max(1.0 - _thr, 1e-6), 0.0, 1.0)
+            _islands = np.clip(_islands ** 0.62, 0.0, 1.0)
+            # Edge fluff: wispy halo around clumps (keep sharp — do not over-blur).
+            _edge = np.clip(_cloud_body - _body_b * 0.78, 0.0, 1.0) ** 0.78
+            # Keep mid/hi residual unblurred so clumps have internal fluff.
+            _fluff = np.clip(
+                (_puff_mid - _gauss_cloud(_puff_mid, float(np.clip(_sc * 0.010, 1.2, 9.0)), periodic_x=wrap_lon_blur_x) * 0.7)
+                * 1.35,
+                0.0,
+                1.0,
+            )
+            _fluff = np.clip(_fluff + 0.55 * _puff_hi, 0.0, 1.0)
+            _dust_op = np.clip(
+                _islands * 0.62
+                + _edge * 0.40
+                + _fluff * 0.55
+                + _body_b * 0.10,
+                0.0,
+                1.0,
+            )
+            _dust_op = np.clip(_dust_op * (0.48 + 0.52 * _host), 0.0, 1.0)
+            # Tiny feather for anti-alias only.
+            _dust_op = _gauss_cloud(
+                _dust_op, float(np.clip(_sc * 0.0012, 0.35, 1.6)), periodic_x=wrap_lon_blur_x
+            )
+            # Translucent brown veil — denser cores, wispy edges; continuum stays visible.
+            _T = np.clip(1.0 - _dust_op * 0.45, 0.50, 1.0)
+            _brown = np.array([0.70, 0.54, 0.38], dtype=np.float64).reshape(1, 1, 3)
+            _veiled = canvas * _T[..., np.newaxis]
+            _veiled = _veiled * (0.68 + 0.32 * _brown)
+            # Core darkening inside islands for soft volume (not opaque black).
+            _core_dark = np.clip((_islands - 0.22) / 0.78, 0.0, 1.0) ** 1.0
+            _veiled = _veiled * (1.0 - (0.18 + 0.12 * _fluff)[..., np.newaxis] * _core_dark[..., np.newaxis])
+            _mix = (_dust_op * 0.72 * _host)[..., np.newaxis]
+            canvas = np.clip(canvas * (1.0 - _mix) + _veiled * _mix, 0.0, None)
+            _shoulder = np.clip(_dw_s**1.05, 0.0, 1.0)
+            if morph_gas_struct is not None:
+                _mg_a = np.clip(np.asarray(morph_gas_struct, dtype=np.float64), 0.0, 1.0)
+                _shoulder = np.clip(_shoulder * (0.45 + 0.65 * _mg_a), 0.0, 1.0)
             _amb = _shoulder[..., np.newaxis] * np.array(
-                [0.042, 0.038, 0.034], dtype=np.float64
+                [0.028, 0.024, 0.018], dtype=np.float64
             )
             _lu_c = rec709_luma(canvas)
             canvas = np.clip(
-                canvas + _amb * np.clip(1.0 - _lu_c[..., np.newaxis] * 1.35, 0.12, 1.0),
+                canvas + _amb * np.clip(1.0 - _lu_c[..., np.newaxis] * 1.20, 0.15, 1.0),
                 0.0,
                 1.0,
             )
@@ -4851,16 +5256,38 @@ def render_single(
                 and morph_ism_layers is not None
                 and cfg.features.galaxy_view
             ):
+                # Stronger plane-gated HII/gold pockets for MW band structure.
+                _hii_s = 1.55 if mw_band else 0.72
                 emit_layer = np.maximum(
                     emit_layer,
-                    morph_ism_layers.red_hii_rgb * neb_rad_scale * 0.72,
+                    morph_ism_layers.red_hii_rgb * neb_rad_scale * _hii_s,
                 )
+                if mw_band and hasattr(morph_ism_layers, "gold_emit_rgb"):
+                    _dark = np.clip(1.0 - np.asarray(ext_paint, dtype=np.float64), 0.0, 1.0)
+                    _clear = np.clip(1.0 - _dark**1.2, 0.0, 1.0)
+                    _dw_e = (
+                        np.clip(np.asarray(disk_w, dtype=np.float64), 0.0, 1.0)
+                        if disk_w is not None
+                        else np.ones_like(_clear)
+                    )
+                    if _dw_e.ndim == 1:
+                        _dw_e = _dw_e[:, None]
+                    _pocket = np.clip(_dw_e**1.25 * _clear, 0.0, 1.0)
+                    emit_layer = np.maximum(
+                        emit_layer,
+                        morph_ism_layers.gold_emit_rgb
+                        * neb_rad_scale
+                        * 1.15
+                        * _pocket[..., np.newaxis],
+                    )
             if dust_primary and galactic is not None:
                 emit_boost = np.clip(
                     0.35 + 0.65 * galactic.star_formation * (1.0 - 0.35 * galactic.void_mask),
                     0.25,
                     1.0,
                 )
+                if mw_band:
+                    emit_boost = np.clip(emit_boost * 1.45, 0.25, 1.35)
                 emit_layer *= emit_boost[..., np.newaxis]
             if emit_morph is not None:
                 emit_layer *= emit_morph[..., np.newaxis]
@@ -4924,8 +5351,8 @@ def render_single(
                 canvas,
                 emit_band,
                 emit_hot_band,
-                add_strength=0.32 if scene_nebula else 1.0,
-                core_screen_mix=0.10 if scene_nebula else 0.68,
+                add_strength=0.32 if scene_nebula else (1.35 if mw_band else 1.0),
+                core_screen_mix=0.10 if scene_nebula else (0.78 if mw_band else 0.68),
             )
             emit_unsharp = float(cfg.features.emission_unsharp_amount) * float(
                 cfg.features.nebula_color_strength
@@ -4940,6 +5367,23 @@ def render_single(
                 amp=emit_unsharp,
                 periodic_x=wrap_lon_blur_x,
             )
+            if (
+                mw_band
+                and cfg.nebula_mode == NebulaMode.galaxy_streak
+                and disk_w is not None
+            ):
+                # Band-masked local contrast so bright pockets pop against dust lanes.
+                _dw_lc = np.clip(np.asarray(disk_w, dtype=np.float64), 0.0, 1.0)
+                if _dw_lc.ndim == 1:
+                    _dw_lc = _dw_lc[:, None]
+                _band_m = np.clip(_dw_lc**1.15, 0.0, 1.0)
+                _contrasted = apply_local_contrast(
+                    canvas, strength=0.22, periodic_x=wrap_lon_blur_x
+                )
+                _contrasted = apply_global_s_curve(_contrasted, strength=0.18)
+                canvas = canvas * (1.0 - _band_m[..., np.newaxis]) + _contrasted * _band_m[
+                    ..., np.newaxis
+                ]
             scatter_s = (
                 0.042
                 * float(cfg.features.nebula_color_strength)
@@ -5027,7 +5471,9 @@ def render_single(
                 plane_gate=pg,
             )
             haze_s = float(cfg.features.nebula_haze_strength) * morph_haze_scale * cont_sup * 0.88
-            if dust_primary:
+            if not cfg.features.nebula_haze:
+                haze_s = 0.0
+            elif dust_primary:
                 haze_s *= 0.18  # cinematic: keep ISM haze subtle vs midplane structure
             haze_warm = 0.36 if dust_primary else 1.0
             gold_h = np.array([0.40, 0.39, 0.37], dtype=np.float64) * haze_warm
@@ -5082,7 +5528,7 @@ def render_single(
             cloud_scale = (1.28 + 0.22 * ism_dom) if dust_primary else (1.15 + 0.20 * ism_dom)
             if dust_primary and morph_cont_guide is not None:
                 cloud_scale *= 0.32
-            if cont_sup > 0.06:
+            if cont_sup > 0.06 and cfg.features.nebula_haze:
                 _cloud_luma = (
                     morph_cont_guide
                     if dust_primary and morph_cont_guide is not None
@@ -5125,7 +5571,7 @@ def render_single(
                 * gc,
                 galaxy_hdr=gv_hdr,
             )
-        if cfg.nebula_mode == NebulaMode.galaxy_streak:
+        if cfg.nebula_mode == NebulaMode.galaxy_streak and cfg.features.nebula_haze:
             band_air = (
                 plane_gate
                 if plane_gate is not None
@@ -5248,8 +5694,10 @@ def render_single(
         if (
             cfg.features.galaxy_view
             and cfg.features.nebula
+            and cfg.features.nebula_haze
             and disk_w is not None
             and not scene_nebula
+            and ism_dom > 1e-6
         ):
             # MW band ISM lift — skip in nebula scene (would grey the full FOV via disk_w).
             ism_lift_luma = (
@@ -5428,7 +5876,9 @@ def render_single(
     use_star_display_desat = render_profile == RenderProfile.full
     # Stars-only on black: display grade lifts near-zero voids to mid-grey haze.
     # Keep true black floor and show resolved stars (+ heroes) without continuum grade.
-    stars_on_black = bool(cfg.features.black_background) and not bool(cfg.features.nebula)
+    # Use paint_nebula (not features.nebula): --no-galaxy-view leaves nebula=on but
+    # skips band gas — still needs the same HDR stretch/bloom as --mode nebula --no-nebula.
+    stars_on_black = bool(cfg.features.black_background) and not paint_nebula
     if stars_on_black:
         use_linear_grade = False
         use_display_finish = False
@@ -5496,9 +5946,8 @@ def render_single(
                 disk_w=disk_w,
                 vignette_strength=cfg.features.vignette_strength,
             )
-        if not scene_nebula:
-            # MW midplane envelope / sharpen / zodiac / ripple — skip in nebula scene
-            # (separable unsharp + disk grain reintroduce vertical corduroy).
+        if not scene_nebula and cfg.features.nebula_haze:
+            # MW midplane envelope — skip with --no-haze (soft continuum re-wash).
             env_scale = 0.68 if stars_above_nebula else 1.0
             canvas = _apply_galactic_disk_luminance_envelope(
                 canvas, rng_post, disk_w=disk_w, strength_scale=env_scale
@@ -5703,7 +6152,7 @@ def render_single(
                     * 0.18,
                     multi_scatter_strength=0.16,
                     hii_strength=0.11,
-                    void_turbulence=0.22,
+                    void_turbulence=0.10,
                     anti_blue=0.22,
                     gas_texture=morph_gas_struct,
                     periodic_x=wrap_lon_blur_x,
@@ -5716,7 +6165,7 @@ def render_single(
                         morph_gas_struct,
                         disk_w,
                         plane_gate=plane_gate,
-                        strength=0.32,
+                        strength=0.52,
                     )
                 # After morph reinforce: strip HF gold dashes that grade kill missed.
                 if disk_w is not None:
@@ -5963,7 +6412,9 @@ def render_single(
                             strength=float(cfg.features.post_star_lane_protect_strength),
                         )
         else:
-            _medium_only_grade = bool(cfg.features.galaxy_view and not cfg.features.stars)
+            # Band-only (--no-stars) is the final plate: keep local contrast / S-curve so
+            # morph+gas structure survives display stretch (star_overlay_pending flattens).
+            _medium_only_grade = False
             if cfg.features.optics_before_tone_map and use_linear_grade:
                 canvas = apply_galaxy_linear_grade_pipeline(
                     canvas,
@@ -5998,6 +6449,74 @@ def render_single(
                         rng_post,
                         star_overlay_pending=_medium_only_grade,
                         **_display_kw,
+                    )
+            # Solo path previously skipped band color grade — apply soft translucent dust.
+            if (
+                cfg.features.galactic_band_color_grade
+                and cfg.features.galaxy_view
+                and disk_w is not None
+                and ext_paint_for_fg is not None
+                and cfg.nebula_mode == NebulaMode.galaxy_streak
+            ):
+                _hii_hint = None
+                if band_hii_layer is not None and float(np.max(band_hii_layer)) > 1e-8:
+                    _hii_hint = rec709_luma(np.maximum(band_hii_layer, 0.0))
+                _dust_m = galactic.dust_absorption_morph if galactic is not None else None
+                _sf_m = galactic.star_formation if galactic is not None else None
+                _void_m = galactic.void_mask if galactic is not None else None
+                _turb_m = galactic.latent_turb if galactic is not None else None
+                _lane_arch = None
+                _shell_arch = None
+                _dens_g = None
+                _surv = None
+                _gold_pop = None
+                if galactic is not None:
+                    _dens_g = galactic.stellar_density
+                    _surv = galactic.structure_survival
+                    _gold_pop = galactic.gold_population_weight
+                    if galactic.structure_architecture is not None:
+                        _lane_arch = galactic.structure_architecture.dust_lane_weight
+                        _shell_arch = galactic.structure_architecture.puff_shell_weight
+                canvas = apply_galactic_band_color_grade(
+                    canvas,
+                    disk_w,
+                    ext_paint_for_fg,
+                    dust_absorption=_dust_m,
+                    star_formation=_sf_m,
+                    void_mask=_void_m,
+                    latent_turb=_turb_m,
+                    hii_hint=_hii_hint,
+                    dust_lane_weight=_lane_arch,
+                    puff_shell_weight=_shell_arch,
+                    stellar_density=_dens_g,
+                    structure_survival=_surv,
+                    gold_population=_gold_pop,
+                    strength=float(cfg.features.galactic_band_color_grade_strength),
+                    inner_bias=float(cfg.features.galactic_band_color_inner_bias),
+                    dust_black_strength=float(cfg.features.galactic_band_dust_black_strength),
+                    gas_fluff_strength=float(cfg.features.galactic_band_gas_fluff_strength),
+                    micro_display_strength=float(
+                        cfg.features.galactic_band_micro_display_strength
+                    )
+                    * 0.55,
+                    separation_strength=float(cfg.features.galactic_band_separation_strength)
+                    * 0.18,
+                    multi_scatter_strength=0.16,
+                    hii_strength=0.11,
+                    void_turbulence=0.10,
+                    anti_blue=0.22,
+                    gas_texture=morph_gas_struct,
+                    periodic_x=wrap_lon_blur_x,
+                    blur_fn=_blur_separable_xy,
+                    rng=rng_post,
+                )
+                if morph_gas_struct is not None and disk_w is not None:
+                    canvas = _reinforce_morph_canvas_texture(
+                        canvas,
+                        morph_gas_struct,
+                        disk_w,
+                        plane_gate=plane_gate,
+                        strength=0.55,
                     )
         # Nebula scene re-paints heroes after remask; skip early ghosts there.
         if (
@@ -6113,6 +6632,277 @@ def render_single(
                 periodic_x=wrap_lon_blur_x,
                 blur_fn=_blur_separable_xy,
             )
+        if (
+            mw_band
+            and ext_paint_for_fg is not None
+            and disk_w is not None
+            and not scene_nebula
+            and cfg.nebula_mode == NebulaMode.galaxy_streak
+        ):
+            # Soft translucent remask: blur ext first so underglow meets spine smoothly.
+            _ext_d = np.clip(np.asarray(ext_paint_for_fg, dtype=np.float64), 0.0, 1.0)
+            _ext_d = _blur_separable_xy(_ext_d, passes=2, periodic_x=wrap_lon_blur_x)
+            _dw_d = np.clip(np.asarray(disk_w, dtype=np.float64), 0.0, 1.0)
+            if _dw_d.ndim == 1:
+                _dw_d = _dw_d[:, None]
+            # Prefer bleed host so remask does not razor-cut to thin disk_w.
+            if band_bleed_env is not None:
+                _bbe_r = np.clip(np.asarray(band_bleed_env, dtype=np.float64), 0.0, 1.0)
+                if _bbe_r.ndim == 1:
+                    _bbe_r = _bbe_r[:, None]
+                if _bbe_r.shape == _dw_d.shape:
+                    _dw_d = np.clip(np.maximum(_dw_d, _bbe_r * 0.90), 0.0, 1.0)
+            _keep_d = np.clip(0.55 + 0.45 * np.power(_ext_d, 0.75), 0.48, 1.0)
+            if galactic is not None:
+                _dust_a = np.clip(galactic.dust_absorption_morph, 0.0, 1.0)
+                _dust_a = _blur_separable_xy(_dust_a, passes=2, periodic_x=wrap_lon_blur_x)
+                _keep_d = np.clip(_keep_d * (1.0 - 0.08 * _dust_a**0.70), 0.48, 1.0)
+            _keep_d = np.clip(
+                _keep_d * _dw_d**0.25 + (1.0 - _dw_d**0.25),
+                0.48,
+                1.0,
+            )
+            _keep_d = _blur_separable_xy(_keep_d, passes=2, periodic_x=wrap_lon_blur_x)
+            # Soft lerp — translucent dust veil, not opaque black holes.
+            _remask_mix = 0.22
+            _darkened = canvas * _keep_d[..., np.newaxis]
+            canvas = np.clip(
+                canvas * (1.0 - _remask_mix) + _darkened * _remask_mix, 0.0, 1.0
+            )
+            # Re-inject morph structure lost in grade wash (clumps inside clear zones).
+            _sn = None
+            if morph_gas_struct is not None:
+                _sg = np.clip(np.asarray(morph_gas_struct, dtype=np.float64), 0.0, 1.0)
+                _lo = float(np.percentile(_sg, 8))
+                _hi = float(np.percentile(_sg, 99)) + 1e-8
+                _sn = np.clip((_sg - _lo) / (_hi - _lo), 0.0, 1.0)
+                _sn_b = _blur_separable_xy(_sn, passes=2, periodic_x=wrap_lon_blur_x)
+                _sn_d = np.clip(_sn - _sn_b * 0.70, -0.25, 1.0)
+                _sn_d = _blur_separable_xy(_sn_d, passes=1, periodic_x=wrap_lon_blur_x)
+                _sn = _blur_separable_xy(np.clip(_sn, 0.0, 1.0), passes=1, periodic_x=wrap_lon_blur_x)
+                # Brighten clumps only — darken term was re-cutting black into clouds.
+                _mod = np.clip(
+                    0.78
+                    + 0.40 * _sn * np.power(_ext_d, 0.50)
+                    + 0.18 * _sn_d * _ext_d,
+                    0.72,
+                    1.35,
+                )
+                _mod = _mod * _dw_d + (1.0 - _dw_d)
+                canvas = np.clip(canvas * _mod[..., np.newaxis], 0.0, 1.0)
+            # Pocket lift weighted by morph so clear flats do not become uniform fill.
+            _pocket_lift = np.clip(np.power(_ext_d, 0.55) * _dw_d**1.05, 0.0, 1.0)
+            if _sn is not None:
+                _pocket_lift = _pocket_lift * (0.35 + 0.65 * _sn)
+            canvas = np.clip(canvas * (1.0 + 0.32 * _pocket_lift[..., np.newaxis]), 0.0, 1.0)
+            # Mild local contrast only — strong crush made midtone dust read as black cutouts.
+            _contrasted = apply_local_contrast(
+                canvas, strength=0.12, periodic_x=wrap_lon_blur_x
+            )
+            canvas = canvas * (1.0 - 0.35 * _dw_d[..., np.newaxis]) + _contrasted * (
+                0.35 * _dw_d[..., np.newaxis]
+            )
+            if galactic is not None:
+                # Warm yellow-white spine after remask so gold survives grade.
+                _gold = np.clip(galactic.gold_population_weight, 0.0, 1.0)
+                _spine = np.clip(
+                    _dw_d**0.95 * (0.28 + 0.72 * _gold) * np.power(_ext_d, 0.50),
+                    0.0,
+                    1.0,
+                )
+                _warm = np.array([1.16, 1.03, 0.74], dtype=np.float64)
+                _w_amt = np.clip(0.58 * _spine, 0.0, 0.35)
+                canvas = np.maximum(
+                    0.0,
+                    canvas * (1.0 - _w_amt[..., np.newaxis])
+                    + canvas * _warm.reshape(1, 1, 3) * _w_amt[..., np.newaxis],
+                )
+            # Bright-core sandwich: sheath was brighter than core and read as black cutouts.
+            _lu_cf = rec709_luma(np.maximum(canvas, 0.0))
+            _blur_cf = _blur_separable_xy(_lu_cf, passes=4, periodic_x=wrap_lon_blur_x)
+            _core_w = np.clip(_dw_d**1.05, 0.0, 1.0)
+            # Lift core toward local soft peak; keep dust as midtone mottle, not crushed dark.
+            _target = np.maximum(_lu_cf, _blur_cf * (0.55 + 0.35 * _core_w) + 0.12 * _core_w)
+            _scale_cf = np.where(
+                _lu_cf > 1e-8, _target / np.maximum(_lu_cf, 1e-8), 1.0
+            )
+            _warm_core = np.array([1.08, 0.98, 0.82], dtype=np.float64).reshape(1, 1, 3)
+            _lifted = canvas * _scale_cf[..., np.newaxis] * (
+                1.0 + 0.12 * (_core_w[..., np.newaxis] * (_warm_core - 1.0))
+            )
+            # Prefer lift where core is dimmer than sheath blur.
+            _cf_w = (
+                0.72 * _core_w * np.clip((_blur_cf - _lu_cf) / 0.18 + 0.35, 0.0, 1.0)
+            )[..., np.newaxis]
+            canvas = np.clip(canvas * (1.0 - _cf_w) + _lifted * _cf_w, 0.0, 1.0)
+            # Soft sheath dim so continuum peaks on the cloud body, not the rim glow.
+            _sheath = np.clip((1.0 - _dw_d**0.85) * _dw_d**0.35, 0.0, 1.0)
+            canvas = np.clip(
+                canvas * (1.0 - 0.28 * _sheath[..., np.newaxis]), 0.0, 1.0
+            )
+        if no_haze_struct_keep is not None and not scene_nebula:
+            # Display grade stretches dim continuum into a flat blinding band — remask to structure.
+            keep = np.clip(np.asarray(no_haze_struct_keep, dtype=np.float64), 0.0, 1.0)
+            keep = _blur_separable_xy(keep, passes=2, periodic_x=wrap_lon_blur_x)
+            keep = np.clip(keep ** 0.92, 0.0, 1.0)
+            lu = rec709_luma(np.maximum(canvas, 0.0))
+            soft = _blur_separable_xy(lu, passes=5, periodic_x=wrap_lon_blur_x)
+            mid = _blur_separable_xy(lu, passes=1, periodic_x=wrap_lon_blur_x)
+            detail = np.clip((mid - soft * 0.90) / (float(np.percentile(lu, 99.0)) + 1e-8), 0.0, 1.0)
+            keep = np.clip(np.maximum(keep, detail**0.85), 0.0, 1.0)
+            # Soft structure keep — hard 0.06 floor re-cut opaque black holes into clouds.
+            if mw_band:
+                floor = np.clip(0.48 + 0.52 * keep, 0.42, 1.0)
+                canvas = np.clip(
+                    canvas * (0.55 + 0.45 * floor[..., np.newaxis]), 0.0, 1.0
+                )
+            else:
+                floor = np.clip(0.06 + 0.94 * keep, 0.0, 1.0)
+                canvas = np.clip(canvas * floor[..., np.newaxis], 0.0, 1.0)
+                soft2 = _blur_separable_xy(rec709_luma(canvas), passes=4, periodic_x=wrap_lon_blur_x)
+                pedestal = np.clip(soft2 - rec709_luma(canvas) * 0.28, 0.0, None)
+                ped_amp = float(np.percentile(pedestal, 92)) + 1e-8
+                ped_w = np.clip(pedestal / ped_amp, 0.0, 1.0) * (1.0 - keep)
+                canvas = np.clip(canvas * (1.0 - 0.78 * ped_w)[..., np.newaxis], 0.0, 1.0)
+        # Final MW cloud sandwich — reinject continuous continuum tube after remask/grade.
+        if (
+            mw_band
+            and disk_w is not None
+            and cfg.nebula_mode == NebulaMode.galaxy_streak
+            and not scene_nebula
+        ):
+            _dw_f = np.clip(np.asarray(disk_w, dtype=np.float64), 0.0, 1.0)
+            if _dw_f.ndim == 1:
+                _dw_f = _dw_f[:, None]
+            _yy_f = np.linspace(-1.0, 1.0, cfg.height, dtype=np.float64)[:, None]
+            _sig_f = float(np.clip(cfg.features.band_lat_sigma * 1.85, 0.18, 0.42))
+            _tube_f = np.broadcast_to(
+                np.exp(-((_yy_f / _sig_f) ** 2)), _dw_f.shape
+            ).astype(np.float64)
+            _host_f = np.clip(np.maximum(_dw_f**0.55, _tube_f * 0.90), 0.0, 1.0)
+            _host_f = _blur_separable_xy(_host_f, passes=3, periodic_x=wrap_lon_blur_x)
+            _cont_f = (_host_f * 0.38)[..., np.newaxis] * np.array(
+                [0.70, 0.60, 0.46], dtype=np.float64
+            ).reshape(1, 1, 3)
+            canvas = np.maximum(canvas, _cont_f)
+            # Late billowy dust clouds — grade/remask washes early dust texture.
+            from starsky_gen.structure_envelope import build_fine_puff_field as _puff_f
+            from starsky_gen.procedural_noise import gaussian_blur_pil as _gauss_f
+
+            _sc_f = float(max(cfg.height, cfg.width))
+            _cloud_rng = np.random.default_rng(
+                int(seed) + generation_index * 8801 + 0xC10D
+            )
+            _c_lo = _puff_f(
+                _cloud_rng, cfg.height, cfg.width, periodic_x=wrap_lon_blur_x, strength=1.0, center_boost=0.16
+            )
+            _c_lo = _gauss_f(_c_lo, float(np.clip(_sc_f * 0.028, 3.5, 22.0)), periodic_x=wrap_lon_blur_x)
+            _c_mid = _puff_f(
+                np.random.default_rng(int(_cloud_rng.integers(0, 2**31 - 1)) ^ 0xBEEF),
+                cfg.height,
+                cfg.width,
+                periodic_x=wrap_lon_blur_x,
+                strength=1.0,
+                center_boost=0.14,
+            )
+            _c_mid = _gauss_f(_c_mid, float(np.clip(_sc_f * 0.009, 1.2, 9.0)), periodic_x=wrap_lon_blur_x)
+            _c_hi = _puff_f(
+                np.random.default_rng(int(_cloud_rng.integers(0, 2**31 - 1)) ^ 0xF00D),
+                cfg.height,
+                cfg.width,
+                periodic_x=wrap_lon_blur_x,
+                strength=1.0,
+                center_boost=0.10,
+            )
+            # Sharper grain for porous cloudlets (puff alone is too cotton-smooth).
+            _grain = _cloud_rng.random((cfg.height, cfg.width), dtype=np.float64)
+            _grain = _gauss_f(_grain, float(np.clip(_sc_f * 0.0022, 0.45, 2.8)), periodic_x=wrap_lon_blur_x)
+            _grain2 = np.random.default_rng(int(_cloud_rng.integers(0, 2**31 - 1)) ^ 0xA11E).random(
+                (cfg.height, cfg.width), dtype=np.float64
+            )
+            _grain2 = _gauss_f(_grain2, float(np.clip(_sc_f * 0.0055, 0.9, 5.5)), periodic_x=wrap_lon_blur_x)
+            _c_mid_s = _gauss_f(
+                _c_mid, float(np.clip(_sc_f * 0.014, 1.8, 12.0)), periodic_x=wrap_lon_blur_x
+            )
+            _c_hi_s = _gauss_f(
+                _c_hi, float(np.clip(_sc_f * 0.008, 1.0, 7.0)), periodic_x=wrap_lon_blur_x
+            )
+            # High-contrast residual mottle → stretch so islands become porous clumps.
+            _c_mottle = np.clip(
+                (_c_mid - _c_mid_s * 0.78) * 2.4
+                + (_c_hi - _c_hi_s * 0.70) * 2.0
+                + (_grain - 0.5) * 0.55
+                + (_grain2 - 0.5) * 0.40,
+                0.0,
+                1.0,
+            )
+            _hm = _host_f > 0.28
+            if np.any(_hm):
+                _p15 = float(np.percentile(_c_mottle[_hm], 15.0))
+                _p88 = float(np.percentile(_c_mottle[_hm], 88.0))
+                _c_mottle = np.clip((_c_mottle - _p15) / max(_p88 - _p15, 1e-6), 0.0, 1.0)
+            _c_mottle = np.clip(_c_mottle ** 0.78, 0.0, 1.0)
+            _c_body = np.clip(_c_lo * 0.34 + _c_mid * 0.40 + _c_mottle * 0.38, 0.0, 1.0)
+            _c_blur = _gauss_f(_c_body, float(np.clip(_sc_f * 0.014, 1.8, 12.0)), periodic_x=wrap_lon_blur_x)
+            _c_thr = float(np.percentile(_c_body[_hm], 42.0)) if np.any(_hm) else 0.42
+            # Soft mass envelope (where cloud complexes live).
+            _c_isl = np.clip((_c_body - _c_thr) / max(1.0 - _c_thr, 1e-6), 0.0, 1.0) ** 0.55
+            _c_isl = _gauss_f(_c_isl, float(np.clip(_sc_f * 0.005, 0.7, 4.5)), periodic_x=wrap_lon_blur_x)
+            # Discrete cloudlets inside envelope — gaps keep continuum windows.
+            _c_lets = np.clip((_c_mottle - 0.28) / 0.72, 0.0, 1.0) ** 0.68
+            _c_lets = _gauss_f(_c_lets, float(np.clip(_sc_f * 0.0012, 0.35, 1.6)), periodic_x=wrap_lon_blur_x)
+            _c_edge = np.clip(_c_body - _c_blur * 0.70, 0.0, 1.0) ** 0.70
+            _c_fluff = np.clip(_c_lets * 0.55 + _c_mottle * 0.50 + _c_edge * 0.35, 0.0, 1.0)
+            # Porous opacity: envelope × cloudlets (not a filled slab).
+            _c_dust = np.clip(
+                _c_isl * (0.18 + 0.82 * _c_lets)
+                + _c_edge * 0.38
+                + _c_fluff * 0.28
+                + _c_blur * 0.06,
+                0.0,
+                1.0,
+            ) * (0.40 + 0.60 * _host_f)
+            _c_dust = _gauss_f(
+                _c_dust, float(np.clip(_sc_f * 0.0009, 0.28, 1.2)), periodic_x=wrap_lon_blur_x
+            )
+            # Depth tracks cloudlets — thick clumps, thin between.
+            _c_depth = np.clip(
+                0.18 + 0.48 * _c_lets * _c_isl + 0.14 * _c_fluff,
+                0.16,
+                0.70,
+            )
+            _c_T = np.clip(1.0 - _c_dust * _c_depth, 0.48, 1.0)
+            _c_brown = np.array([0.68, 0.52, 0.36], dtype=np.float64).reshape(1, 1, 3)
+            _c_veil = canvas * _c_T[..., np.newaxis] * (0.72 + 0.28 * _c_brown)
+            _c_core = np.clip(_c_lets * _c_isl, 0.0, 1.0) ** 0.90
+            _c_veil = _c_veil * (
+                1.0 - (0.14 + 0.16 * _c_fluff)[..., np.newaxis] * _c_core[..., np.newaxis]
+            )
+            # Continuum windows between cloudlets (porous cloud volume).
+            _c_win = np.clip((1.0 - _c_lets) * _c_isl * 0.35, 0.0, 1.0)
+            _c_veil = _c_veil + canvas * _c_win[..., np.newaxis] * 0.28
+            _c_mix = (_c_dust * 0.80 * _host_f)[..., np.newaxis]
+            canvas = np.clip(canvas * (1.0 - _c_mix) + _c_veil * _c_mix, 0.0, 1.0)
+            # Rim wisps so falloff edges look dusty, not void-cut.
+            _rim_f = np.clip(_host_f * (1.2 - _host_f), 0.0, 1.0)
+            _wisp_rgb = np.array([0.24, 0.18, 0.12], dtype=np.float64).reshape(1, 1, 3)
+            canvas = np.clip(
+                canvas + (_rim_f * _c_edge * 0.12)[..., np.newaxis] * _wisp_rgb,
+                0.0,
+                1.0,
+            )
+            # Lift only true voids — midtone mottling must stay (was flattening clouds).
+            _lu_f = rec709_luma(np.maximum(canvas, 0.0))
+            _void_lift = np.clip((0.12 - _lu_f) / 0.12, 0.0, 1.0) * np.clip(_dw_f**1.1, 0.0, 1.0)
+            canvas = np.clip(
+                canvas + (_void_lift * 0.06)[..., np.newaxis] * np.array(
+                    [0.55, 0.48, 0.38], dtype=np.float64
+                ).reshape(1, 1, 3),
+                0.0,
+                1.0,
+            )
+            _sheath_f = np.clip((1.0 - _dw_f**0.90) * _dw_f**0.40, 0.0, 1.0)
+            canvas = np.clip(canvas * (1.0 - 0.10 * _sheath_f[..., np.newaxis]), 0.0, 1.0)
         canvas = ensure_hdr(np.clip(canvas, 0.0, 1.0))
         _notify_stage("grade/color", 1.0)
 
@@ -6407,12 +7197,38 @@ def render_single(
     if iso is not None and iso != IsolateLayer.none:
         plate = np.zeros_like(canvas, dtype=np.float64)
         if iso == IsolateLayer.background_stars:
+            # Same photoreal display path as stars-on-black (not raw HDR normalize).
             stack = np.maximum(
                 0.0,
                 stars_cosmic + stars_halo + stars_bg + stars_mid * 0.92 + stars_fg,
             )
-            peak = float(np.percentile(stack, 99.7)) if stack.size else 1.0
-            plate = np.clip(stack / max(peak, 1e-6), 0.0, 1.0)
+            flat_dw = np.ones((cfg.height, cfg.width), dtype=np.float64)
+            _sg = float(cfg.features.star_display_stretch_gain)
+            if _sg < 1.0:
+                _sg = 10.0
+            if float(np.max(stack)) > 1e-8:
+                plate = _hdr_stars_to_display(
+                    stack,
+                    flat_dw,
+                    stretch_gain=_sg,
+                    peak_percentile=float(cfg.features.star_stretch_peak_percentile),
+                    faint_desat=0.0,
+                    display_cap=cfg.features.star_display_white_cap,
+                    output_gain=1.35,
+                )
+                bloom_s = float(np.clip(cfg.features.star_layer_bloom_strength, 0.0, 1.0))
+                if bloom_s < 0.12:
+                    bloom_s = 0.24
+                plate = apply_tri_scale_bloom(
+                    plate,
+                    flat_dw,
+                    strength=bloom_s * 0.92,
+                    threshold=0.58,
+                    mix_tight=0.62,
+                    mix_mid=0.28,
+                    mix_wide=0.08,
+                    periodic_x=wrap_lon_blur_x,
+                )
         elif iso == IsolateLayer.heroes:
             if hero_records:
                 h, w = int(cfg.height), int(cfg.width)
@@ -6503,6 +7319,7 @@ def render_single(
             cloud_structure=cloud_structure,
             cloud_emission=cloud_emission,
             cloud_dust=cloud_dust,
+            continuum_gas=isolate_neb_plate,
         )
 
     if cfg.projection_mode in {ProjectionMode.cubemap, ProjectionMode.both}:

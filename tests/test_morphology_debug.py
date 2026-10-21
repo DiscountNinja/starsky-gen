@@ -224,6 +224,49 @@ def test_nebula_debug_layers_export_cloud_maps(tmp_path: Path) -> None:
         "cloud_emission.png",
         "cloud_dust.png",
         "extinction.png",
-        "resolved_stars.png",
+        "continuum_gas.png",
     ):
         assert (layer_dir / name).is_file(), name
+    # --no-stars: skip empty resolved_stars.png
+    assert not (layer_dir / "resolved_stars.png").is_file()
+
+
+def test_mw_no_stars_debug_layers_export_morph_maps(tmp_path: Path) -> None:
+    """Band-only MW dumps morph/extinction/continuum — not only resolved_stars."""
+    cfg = finalize_render_config(
+        RenderConfig(
+            width=256,
+            height=128,
+            seed=42,
+            generations=1,
+            output_dir=tmp_path,
+            output_base_name="mw_dbg",
+            output_format=OutputFormat.png,
+            projection_mode=ProjectionMode.equirectangular,
+            scene_mode=SceneMode.normal,
+            nebula_mode=NebulaMode.galaxy_streak,
+            features=FeatureConfig(
+                look_target=LookTarget.cinematic,
+                stars=False,
+                hero_star_enabled=False,
+                nebula=True,
+                galaxy_view=True,
+                black_background=True,
+                background_gradient=False,
+                debug_export_layers=True,
+            ),
+        )
+    )
+    saved, _ = render_single(cfg, 0)
+    assert "equirectangular" in saved
+    layer_dir = tmp_path / "mw_dbg_0000_layers"
+    assert layer_dir.is_dir()
+    for name in (
+        "density_G.png",
+        "dust_D.png",
+        "disk_weight.png",
+        "extinction.png",
+        "continuum_gas.png",
+    ):
+        assert (layer_dir / name).is_file(), name
+    assert not (layer_dir / "resolved_stars.png").is_file()

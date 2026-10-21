@@ -25,6 +25,7 @@ def test_provided_params_from_argv() -> None:
         "stars",
         "black_background",
     }
+    assert provided_params(["--no-haze"]) == {"nebula_haze"}
     assert provided_params(["generate", "--seed", "42", "--guided"]) == {"seed"}
     assert provided_params(["--show-defaults"]) == set()
     assert provided_params(["--noheroes", "--nebula-style", "dramatic"]) == {

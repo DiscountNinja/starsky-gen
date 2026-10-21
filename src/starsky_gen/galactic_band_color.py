@@ -181,14 +181,15 @@ def _turbulent_black_dust(
         inner_bias=inner_bias,
         xx=xx,
     )
+    # Void no longer dominates obscure — that stamped opaque holes into cloud body.
     obscure = (
         gas_struct
-        * (0.18 + 0.82 * np.clip(void_w, 0.0, 1.0))
-        * (0.35 + 0.65 * np.clip(turb, 0.0, 1.0))
-        * (0.42 + 0.58 * struct_w)
+        * (0.55 + 0.45 * np.clip(void_w, 0.0, 1.0))
+        * (0.50 + 0.50 * np.clip(turb, 0.0, 1.0))
+        * (0.55 + 0.45 * struct_w)
         * plane
     )
-    obscure = np.clip(obscure**0.72, 0.0, 1.0)
+    obscure = np.clip(obscure**0.95, 0.0, 1.0)
     if float(np.max(obscure)) < 1e-6:
         return out
 
@@ -211,16 +212,21 @@ def _turbulent_black_dust(
     if float(np.max(carve)) < 1e-6:
         return out
 
-    # Crush toward true black — not proportional brown dimming.
+    # Translucent brown veil — opaque black mix was reading as cutouts, not clouds.
     crush = np.clip(carve, 0.0, 1.0)
-    target_lu = np.clip(lu_out * (1.0 - crush) ** 2.35, 0.0, None)
-    target_lu = np.minimum(
-        target_lu,
-        0.006 + lu_out * (1.0 - crush) * 0.05,
-    )
-    black_rgb = _DUST_BLACK.reshape(1, 1, 3) * target_lu[..., np.newaxis]
-    mix = crush[..., np.newaxis]
-    return np.clip(out * (1.0 - mix) + black_rgb * mix, 0.0, 1.0)
+    target_lu = np.clip(lu_out * (1.0 - crush * 0.55) ** 1.10, 0.0, None)
+    # Keep midtone floor so lanes stay gray-brown, not ink.
+    target_lu = np.maximum(target_lu, lu_out * (1.0 - crush * 0.55) * 0.58 + 0.04 * crush)
+    scale = np.where(lu_out > 1e-8, target_lu / np.maximum(lu_out, 1e-8), 1.0)
+    dimmed = out * scale[..., np.newaxis]
+    brown = np.array([0.48, 0.36, 0.26], dtype=np.float64).reshape(1, 1, 3)
+    veiled = dimmed * (0.82 + 0.18 * brown)
+    # Almost no hard black — extreme carve only lightly tints darker brown.
+    hard = np.clip((crush - 0.85) / 0.15, 0.0, 1.0) ** 1.5
+    carved = veiled * (1.0 - 0.18 * hard[..., np.newaxis])
+    mix = (crush * 0.32)[..., np.newaxis]
+    return np.clip(out * (1.0 - mix) + carved * mix, 0.0, 1.0)
+
 
 
 def _display_micro_fields(
@@ -653,7 +659,7 @@ def apply_galactic_band_color_grade(
         * s
     )
 
-    rel_clear = band_relative_clearance(ext, dw, min_clear=0.14, power=0.90)
+    rel_clear = band_relative_clearance(ext, dw, min_clear=0.05, power=0.90)
     lane_dark = np.clip(1.0 - rel_clear, 0.0, 1.0) ** 1.14
 
     xx = np.linspace(-1.0, 1.0, w, dtype=np.float64)[None, :]
@@ -742,8 +748,8 @@ def apply_galactic_band_color_grade(
             gold_w = np.broadcast_to(gold_w, (h, w))
         gold_w = blur_fn(gold_w, passes=4, periodic_x=periodic_x)
         gold_w = np.clip(0.55 * dens_soft + 0.45 * gold_w, 0.0, 1.0)
-        gold_w = gold_w / max(float(np.percentile(gold_w, 99.5)), 1e-6)
-        gold_w = np.clip(gold_w, 0.0, 1.0) ** 1.18
+        gold_w = gold_w / max(float(np.percentile(gold_w, 98.5)), 1e-6)
+        gold_w = np.clip(gold_w, 0.0, 1.0) ** 1.08
     # Razor disk + latitude gate — shoulder latitudes must stay cool/red, not gold.
     from starsky_gen.structure_envelope import midplane_gold_lat_gate
 
@@ -752,11 +758,11 @@ def apply_galactic_band_color_grade(
         lat = np.broadcast_to(lat, (h, w))
     gold_w = gold_w * np.clip(plane**3.05, 0.0, 1.0) * lat
 
-    # Soft amber spine; modest extra weight in central ~35% of tightened gold_w.
+    # Soft amber spine; modest extra weight in central tightened gold_w.
     nz_g = gold_w > 1e-5
     gold_core = np.zeros_like(gold_w)
     if bool(np.any(nz_g)):
-        thr_g = float(np.percentile(gold_w[nz_g], 65.0))
+        thr_g = float(np.percentile(gold_w[nz_g], 55.0))
         gold_core = np.clip((gold_w - thr_g) / max(1.0 - thr_g, 0.08), 0.0, 1.0)
     w_core = np.clip(
         lane_arch
@@ -786,8 +792,8 @@ def apply_galactic_band_color_grade(
     red_src = red_src * (1.0 - 0.55 * gold_w)  # allow more red next to warm core
     gate = red_src > 1e-5
     if bool(np.any(gate)):
-        thr = float(np.percentile(red_src[gate], 70.0))
-        clumped = np.clip((red_src - thr) / max(1.0 - thr, 0.08), 0.0, 1.0) ** 1.50
+        thr = float(np.percentile(red_src[gate], 58.0))
+        clumped = np.clip((red_src - thr) / max(1.0 - thr, 0.08), 0.0, 1.0) ** 1.15
         clumped = blur_fn(clumped, passes=4, periodic_x=periodic_x)
         w_hii = clumped * dens_soft * float(np.clip(hii_strength, 0.0, 0.55)) * 1.55
 
@@ -870,12 +876,17 @@ def apply_galactic_band_color_grade(
             noise = rng.random((h, w), dtype=np.float64)
             noise = blur_fn(noise, passes=1, periodic_x=periodic_x)
             noise = np.clip(noise * 1.4 - 0.35, 0.0, 1.0)
-            crush_w = void_gate * vt * (0.10 + 0.22 * noise)
-            crush_lu = np.minimum(lu_mid, lu_mid * (1.0 - crush_w * 0.38))
-            crush_lu = np.minimum(crush_lu, 0.02 + lu_mid * (1.0 - crush_w) * 0.12)
-            black_rgb = _DUST_BLACK.reshape(1, 1, 3) * crush_lu[..., np.newaxis]
-            mix = crush_w[..., np.newaxis]
-            out = out * (1.0 - mix) + black_rgb * mix
+            # Soft void mottling — opaque black mix read as cutouts, not clouds.
+            crush_w = void_gate * vt * (0.04 + 0.10 * noise)
+            crush_lu = np.maximum(
+                lu_mid * (1.0 - crush_w * 0.28),
+                lu_mid * 0.55 + 0.02,
+            )
+            brown = np.array([0.40, 0.28, 0.20], dtype=np.float64).reshape(1, 1, 3)
+            veiled = out * (crush_lu / np.maximum(lu_mid, 1e-8))[..., np.newaxis]
+            veiled = veiled * (0.78 + 0.22 * brown)
+            mix = (crush_w * 0.45)[..., np.newaxis]
+            out = out * (1.0 - mix) + veiled * mix
 
     if rng is not None and float(gas_fluff_strength) > 1e-6:
         out = _apply_fluffy_micro_gas_texture(

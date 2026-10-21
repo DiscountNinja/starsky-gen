@@ -132,24 +132,32 @@ Galaxy renders still use magnitude-based PSF stars by default (`--photoreal-star
 
 Cinematic prioritizes **volumetric glow + color hierarchy**. BandPlan still drives protect/rifts; `--debug-layers` exports band-plan PNGs. Documentary/long_exposure zero sandwich leftovers.
 
-### Layer toggles and isolate
+### Layer toggles and solo recipes
 
-- `--stars` / `--no-stars` — **background** catalogs (band/mid/cosmic/halo), not heroes
+- `--stars` / `--no-stars` — **background** catalogs (band/mid/cosmic/halo), not heroes. With MW on, `--no-stars` is the full band pipeline solo (morph/gas/ISM/grade, no star catalogs or unresolved grit)
+- `--no-galaxy-view` — strip MW band (morph/ISM/haze/BandPlan/`galaxy_streak`); stars render as a full-sky photoreal field
 - `--noheroes` — disable hero stars only (spikes/ghosts); heroes can render with `--no-stars`
 - `--nebula` / `--no-nebula` — gas; when off, guided skips nebula-mode/style/dust prompts
+- `--haze` / `--no-haze` — soft ISM/gas continuum wash (morph body, haze/cloud/glow, band lift, grade floor). Off keeps dust/emission structure without the blinding milky band; `--no-nebula` for no gas at all; stars-on-black: `--black-background --no-nebula`
 - `--background-density` — off-plane/cosmic/halo **star** density `[0–2]` (0 = none); blank = look default
 - `--cloud-continuity` `[0–1.6]`, `--dust-coverage` `[0–1.6]`, `--dust-strength` `[0–1.8]` (0 = off/none)
 - `--nebula-hero-color` — hero nebula tint (`--mode nebula`): `classic-red`/`red` (`#FF1818`), `gold-core`/`gold`, `cool-blue`/`blue`, `magenta-accent`/`magenta`, `neutral`; or hex (`FF1818`, `0xFF1818`, `'#FF1818'`) / `R,G,B`. In bash, never pass a bare `#…` — the shell treats `#` as a comment (use `FF1818` or quote `'#FF1818'`).
 - `--depth` / `--no-depth` — dim catalog stars toward poles (not camera DOF)
 - `--render-profile` — `physical` = linear only; `physical_grade` = +grade; `full` = +display finish/grain
-- `--isolate-layer` — final plate on black: `none` | `background_stars` | `heroes` | `nebula_gas`
+- `--isolate-layer` — rare compositing plates on black (`none` | `background_stars` | `heroes` | `nebula_gas`); not the day-to-day solo workflow
+- `--debug-layers` — pass dumps under `output/<base>_layers/`
 
 ```bash
-# Black nebula + heroes only
-starsky-gen --mode nebula --black-background --no-stars --nebula \
-  --seed 42 --isolate-layer none
-# Heroes plate only
-starsky-gen --mode nebula --no-stars --isolate-layer heroes --seed 42
+# Band pipeline only (full multi-pass MW, no stars)
+starsky-gen --no-stars --noheroes --black-background --seed 42
+# Stars without MW band
+starsky-gen --no-galaxy-view --black-background --seed 42
+# Nebula star reference (photoreal stamps, no cloud body)
+starsky-gen --mode nebula --no-nebula --black-background --seed 42
+# Pass dumps (band-only example)
+starsky-gen --no-stars --debug-layers --seed 42 -o output
+# Structured band without soft continuum wash
+starsky-gen --black-background --no-stars --no-haze --seed 42
 ```
 
 Key knobs:

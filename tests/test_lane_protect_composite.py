@@ -141,6 +141,7 @@ def test_finalize_cinematic_enables_sandwich_hooks() -> None:
     assert f.post_star_lane_protect_strength >= 0.40
     assert f.dark_rift_strength >= 0.70
     assert f.star_layer_bloom_strength >= 0.10
-    assert f.structure_type_competition >= 0.50
+    # Soft cloud volume: moderate type competition (not razor lane/shell sandwich).
+    assert 0.30 <= f.structure_type_competition <= 0.50
     assert f.nebula_haze_strength <= 0.30
     assert f.long_exposure_look is False

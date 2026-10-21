@@ -10,7 +10,6 @@ Morphology smoothing pipeline (debug layers show puffy/turbulent HF; final rende
   - generator post-pass: extinction on canvas, haze/cloud body, band highlight compress, and
     harmonize_diffuse_canvas_chroma each low-pass the band — morph-primary paths use HF guides.
   - density_G is intentionally smoother (star placement); turbulent ISM detail lives in dust/ISM maps.
-  Runtime: debug logs hypothesisId X (hp_std at merge / unresolved / extinction-on-canvas).
 """
 
 from __future__ import annotations
@@ -479,9 +478,9 @@ def build_galactic_morphology(
         band_w_pre,
         rng,
         band_lat_sigma=band_lat_sigma,
-        jitter_strength=0.56,
-        band_curvature_amp=band_curvature_amp,
-        thickness_asymmetry=band_thickness_asymmetry,
+        jitter_strength=0.16,
+        band_curvature_amp=min(band_curvature_amp, 0.045),
+        thickness_asymmetry=min(band_thickness_asymmetry, 0.14),
         mesoscale_strength=disk_mesoscale_thickness_strength,
         periodic_x=periodic_x,
     )
@@ -592,7 +591,7 @@ def build_galactic_morphology(
         dust_a, void_floor=0.06, sharpness=1.58, opacity_gamma=1.14
     )
     d = apply_cloudy_transmission_breakup(
-        d, puff_soft, band_w_pre, strength=0.46, void_floor=0.06, periodic_x=periodic_x
+        d, puff_soft, band_w_pre, strength=0.58, void_floor=0.06, periodic_x=periodic_x
     )
     if micro_s > 1e-6:
         from starsky_gen.dust_field import _band_host_gate
@@ -603,7 +602,7 @@ def build_galactic_morphology(
                 dust_a, void_floor=0.08, sharpness=1.48, opacity_gamma=1.10
             )
             d_soft = apply_cloudy_transmission_breakup(
-                d_soft, puff_soft, band_w_pre, strength=0.38, periodic_x=periodic_x
+                d_soft, puff_soft, band_w_pre, strength=0.48, periodic_x=periodic_x
             )
             d = np.where(band_t, np.minimum(d, d_soft), d)
         d = carve_dust_transmission_microstructure(
@@ -693,14 +692,14 @@ def build_galactic_morphology(
         disk_w,
         rng,
         band_lat_sigma=band_lat_sigma,
-        jitter_strength=0.56,
-        band_curvature_amp=band_curvature_amp,
-        thickness_asymmetry=band_thickness_asymmetry,
+        jitter_strength=0.16,
+        band_curvature_amp=min(band_curvature_amp, 0.045),
+        thickness_asymmetry=min(band_thickness_asymmetry, 0.14),
         mesoscale_strength=disk_mesoscale_thickness_strength,
         periodic_x=periodic_x,
     )
     disk_w = soften_band_envelope(
-        disk_w, (height, width), periodic_x=periodic_x, lat_blur_sigma=10.0, power=0.54
+        disk_w, (height, width), periodic_x=periodic_x, lat_blur_sigma=20.0, power=0.42
     )
     disk_w = modulate_disk_weight_longitude(
         disk_w,

@@ -96,7 +96,7 @@ _CINEMATIC_LOOK_UPDATE: dict[str, object] = {
     "neutral_wb_strength": 0.24,
     "nebula_haze_strength": 0.14,
     "morphology_nebula_haze_scale": 0.12,
-    "structure_type_competition": 0.58,
+    "structure_type_competition": 0.42,
     # Midplane glow allowed: protect/dropout softer than sandwich-only pass.
     "lane_star_dropout_boost": 0.55,
     "lane_star_dropout_power": 1.15,
@@ -114,7 +114,7 @@ _CINEMATIC_LOOK_UPDATE: dict[str, object] = {
     "background_texture_strength": 0.08,
     "shadow_lift": 0.020,
     "star_psf_bloom_scale": 1.72,
-    "band_lat_sigma": 0.105,
+    "band_lat_sigma": 0.155,
     "spike_max_count": 8,
     "hero_star_count": 7,
     "hero_lens_ghost_strength": 0.085,
@@ -126,7 +126,7 @@ _CINEMATIC_LOOK_UPDATE: dict[str, object] = {
     "galactic_band_color_grade_strength": 0.72,
     "galactic_band_gas_fluff_strength": 0.55,
     "galactic_band_micro_display_strength": 0.62,
-    "galactic_band_dust_black_strength": 0.88,
+    "galactic_band_dust_black_strength": 0.28,
 }
 
 
@@ -239,6 +239,13 @@ class FeatureConfig(BaseModel):
     )
     background_gradient: bool = True
     black_background: bool = False
+    nebula_haze: bool = Field(
+        True,
+        description=(
+            "Soft ISM/gas continuum wash: morph body, haze/cloud/glow, band lift, "
+            "and grade floor. Off keeps dust/emission structure without the milky band."
+        ),
+    )
     jpeg_artifact_pass: bool = False
     long_exposure_look: bool = Field(
         False,
@@ -628,10 +635,10 @@ class FeatureConfig(BaseModel):
         description="Inner-lane weight in final band color grade (higher = stronger dust sub-band).",
     )
     galactic_band_dust_black_strength: float = Field(
-        0.95,
+        0.28,
         ge=0.0,
         le=1.5,
-        description="Turbulent near-black dust carve in the final band color grade.",
+        description="Translucent dust dimming in the final band color grade (low = cloudy, high = opaque cutouts).",
     )
     galactic_band_gas_fluff_strength: float = Field(
         1.05,
@@ -1728,26 +1735,41 @@ def apply_milky_way_recognition_preset(cfg: RenderConfig) -> RenderConfig:
     cinematic = f.look_target == LookTarget.cinematic
     if cinematic:
         update = {
-            "band_ism_dominance": min(max(f.band_ism_dominance, 0.48), 0.58),
-            "band_nebula_radiance_scale": min(f.band_nebula_radiance_scale, 0.88),
-            "band_dark_patch_strength": min(max(f.band_dark_patch_strength, 0.55), 0.72),
-            "galactic_band_gas_fluff_strength": min(max(f.galactic_band_gas_fluff_strength, 0.42), 0.62),
+            # Bright continuum under translucent dust (photo-like cloud body).
+            "band_ism_dominance": min(max(f.band_ism_dominance, 0.58), 0.72),
+            "band_nebula_radiance_scale": min(max(f.band_nebula_radiance_scale, 0.88), 1.05),
+            "morphology_white_brightness": max(f.morphology_white_brightness, 1.22),
+            "galactic_band_gas_fluff_strength": min(max(f.galactic_band_gas_fluff_strength, 0.58), 0.82),
             "galactic_band_micro_display_strength": min(
-                max(f.galactic_band_micro_display_strength, 0.48), 0.68
+                max(f.galactic_band_micro_display_strength, 0.55), 0.78
             ),
-            "galactic_band_separation_strength": max(f.galactic_band_separation_strength, 1.18),
+            "galactic_band_separation_strength": min(
+                max(f.galactic_band_separation_strength, 0.95), 1.12
+            ),
             "structure_architecture_strength": max(f.structure_architecture_strength, 1.12),
             "structure_band_core_drive": max(f.structure_band_core_drive, 0.68),
             "structure_inner_dust_lane_strength": min(
-                max(f.structure_inner_dust_lane_strength, 0.85), 0.98
+                max(f.structure_inner_dust_lane_strength, 0.72), 0.88
             ),
-            "structure_type_competition": max(f.structure_type_competition, 0.55),
+            # Soften lane/shell sandwich so the plane reads thicker/fluffier.
+            "structure_type_competition": min(max(f.structure_type_competition, 0.32), 0.48),
+            "structure_vertical_extent": max(f.structure_vertical_extent, 1.05),
+            "structure_host_latitude_scale": max(f.structure_host_latitude_scale, 2.35),
+            "band_lat_sigma": max(f.band_lat_sigma, 0.20),
+            # Soft cloud volume — high mesoscale stamped jagged black teeth into disk_w.
+            "disk_mesoscale_thickness_strength": min(f.disk_mesoscale_thickness_strength, 0.22),
+            "longitude_asymmetry_strength": min(f.longitude_asymmetry_strength, 0.28),
+            "band_curvature_amp": min(f.band_curvature_amp, 0.045),
+            "morphology_dust_micro_strength": max(f.morphology_dust_micro_strength, 1.35),
+            "morphology_void_strength": min(f.morphology_void_strength, 0.35),
+            "band_dark_patch_strength": min(f.band_dark_patch_strength, 0.42),
             # Glow-allowed cinematic: soft sandwich floors (not mid-crushing).
             "lane_star_dropout_boost": max(f.lane_star_dropout_boost, 0.55),
             "lane_star_dropout_power": max(f.lane_star_dropout_power, 1.15),
             "post_star_lane_protect_strength": max(f.post_star_lane_protect_strength, 0.48),
-            "dark_rift_strength": max(f.dark_rift_strength, 0.75),
-            "dark_rift_coverage": max(f.dark_rift_coverage, 0.15),
+            # Do not force strong rifts — they punch cloud continuity.
+            "dark_rift_strength": min(f.dark_rift_strength, 0.35),
+            "dark_rift_coverage": min(f.dark_rift_coverage, 0.08),
             "star_layer_bloom_strength": max(f.star_layer_bloom_strength, 0.10),
             "star_psf_bloom_scale": max(f.star_psf_bloom_scale, 1.0),
             "star_reddening_strength": min(max(f.star_reddening_strength, 0.90), 1.12),
@@ -1758,29 +1780,32 @@ def apply_milky_way_recognition_preset(cfg: RenderConfig) -> RenderConfig:
             "shadow_lift": min(max(f.shadow_lift, 0.016), 0.024),
             "band_curvature_amp": max(f.band_curvature_amp, 0.08),
             "volumetric_scatter_strength": max(f.volumetric_scatter_strength, 0.40),
-            "nebula_haze_strength": min(f.nebula_haze_strength, 0.16),
-            "morphology_nebula_haze_scale": min(f.morphology_nebula_haze_scale, 0.14),
+            "nebula_haze_strength": min(max(f.nebula_haze_strength, 0.14), 0.20),
+            "morphology_nebula_haze_scale": min(max(f.morphology_nebula_haze_scale, 0.14), 0.22),
             "disk_star_density_dropout": min(f.disk_star_density_dropout, 0.28),
-            "morphology_extinction_lane_carve": min(max(f.morphology_extinction_lane_carve, 0.22), 0.38),
+            "morphology_extinction_lane_carve": min(max(f.morphology_extinction_lane_carve, 0.18), 0.30),
             "morphology_dust_primary": True,
             "split_star_display_grade": True,
-            "extinction_void_floor": max(f.extinction_void_floor, 0.075),
-            "galactic_band_dust_black_strength": min(
-                max(f.galactic_band_dust_black_strength, 0.75), 1.05
-            ),
+            "extinction_void_floor": max(f.extinction_void_floor, 0.085),
+            "extinction_brutal_erasure_strength": min(f.extinction_brutal_erasure_strength, 0.38),
+            "extinction_brutal_survival_floor": max(f.extinction_brutal_survival_floor, 0.08),
+            # Soft cloud dust — high black strength stamped opaque cutouts into the band.
+            "galactic_band_dust_black_strength": min(f.galactic_band_dust_black_strength, 0.32),
             "galactic_band_color_grade_strength": (
                 min(max(f.galactic_band_color_grade_strength, 0.50), 0.62)
                 if f.galactic_band_color_grade
                 else f.galactic_band_color_grade_strength
             ),
             "band_display_peak_cap": min(f.band_display_peak_cap, 0.76),
-            "morphology_absorption_contrast": min(f.morphology_absorption_contrast, 1.22),
-            "morphology_extinction_strength": min(f.morphology_extinction_strength, 1.15),
-            "morphology_extinction_av_scale": min(f.morphology_extinction_av_scale, 0.92),
-            "morphology_missing_region_boost": min(f.morphology_missing_region_boost, 0.22),
+            "morphology_absorption_contrast": min(f.morphology_absorption_contrast, 1.12),
+            "morphology_extinction_strength": min(f.morphology_extinction_strength, 1.08),
+            "morphology_extinction_av_scale": min(f.morphology_extinction_av_scale, 0.88),
+            "morphology_missing_region_boost": min(f.morphology_missing_region_boost, 0.18),
             "extinction_filament_strength": min(f.extinction_filament_strength, 1.08),
-            "extinction_fine_texture_strength": min(f.extinction_fine_texture_strength, 0.28),
-            "galactic_band_color_inner_bias": max(f.galactic_band_color_inner_bias, 0.78),
+            "extinction_fine_texture_strength": min(
+                max(f.extinction_fine_texture_strength, 0.32), 0.42
+            ),
+            "galactic_band_color_inner_bias": max(f.galactic_band_color_inner_bias, 0.72),
         }
     else:
         update = {
@@ -1934,4 +1959,24 @@ def finalize_render_config(cfg: RenderConfig) -> RenderConfig:
     cfg = apply_scene_mode_preset(cfg)
     if cfg.scene_mode == SceneMode.nebula:
         return cfg
-    return apply_milky_way_recognition_preset(cfg)
+    if use_mw_band(cfg):
+        return apply_milky_way_recognition_preset(cfg)
+    # --no-galaxy-view stars-only: same field density / bloom floors as nebula star plates.
+    if not cfg.features.stars:
+        return cfg
+    f = cfg.features
+    bg_default = float(_CINEMATIC_LOOK_UPDATE.get("background_star_density_scale", 0.30))
+    bg_scale = float(f.background_star_density_scale)
+    upd: dict[str, object] = {}
+    if bg_scale >= bg_default - 1e-9:
+        upd["background_star_density_scale"] = max(bg_scale, 0.85)
+    cosmic_scale = float(f.cosmic_star_density_scale)
+    if cosmic_scale > 1e-9:
+        upd["cosmic_star_density_scale"] = max(cosmic_scale, 1.25)
+    upd["star_layer_bloom_strength"] = max(float(f.star_layer_bloom_strength), 0.32)
+    upd["star_shine_through_strength"] = min(
+        0.78, max(float(getattr(f, "star_shine_through_strength", 0.55)), 0.62)
+    )
+    if not upd:
+        return cfg
+    return cfg.model_copy(update={"features": f.model_copy(update=upd)})

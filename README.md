@@ -107,6 +107,7 @@ Feature toggles:
 - `--galaxy-view/--no-galaxy-view` — MW band under `--mode normal`
 - `--background-gradient/--no-background-gradient`
 - `--black-background/--no-black-background`
+- `--haze/--no-haze` — soft continuum wash off (keeps dust/emission structure; see `--no-nebula`)
 - `--jpeg-artifact-pass/--no-jpeg-artifact-pass`
 - `--look-target` (`cinematic|documentary|long_exposure`, default `cinematic`)
 - `--long-exposure-look/--flat-exposure` (advanced cinematic override; prefer `--look-target long_exposure`)
@@ -188,6 +189,7 @@ Shared rendering controls (subset of main options):
 - `--galaxy-view/--no-galaxy-view`
 - `--background-gradient/--no-background-gradient`
 - `--black-background/--no-black-background`
+- `--haze/--no-haze`
 - `--long-exposure-look/--flat-exposure`
 - `--background-texture-strength`
 - `--nebula-style`, `--cloud-continuity`, `--dust-coverage`, `--dust-strength`

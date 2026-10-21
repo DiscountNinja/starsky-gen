@@ -636,6 +636,282 @@ def test_nebula_stars_only_no_midplane_haze(tmp_path) -> None:
     assert float(np.percentile(mid, 25)) < 0.05
 
 
+def test_no_haze_crushes_soft_midplane_wash(tmp_path) -> None:
+    """--no-stars --no-haze keeps continuum structure without haze lifting the floor."""
+    from PIL import Image
+
+    def _mid_soft(path) -> tuple[float, float]:
+        img = np.asarray(Image.open(path), dtype=np.float64) / 255.0
+        lum = 0.2126 * img[..., 0] + 0.7152 * img[..., 1] + 0.0722 * img[..., 2]
+        h = lum.shape[0]
+        mid = lum[h // 2 - 4 : h // 2 + 4]
+        return float(np.percentile(mid, 25)), float(mid.std())
+
+    base = dict(
+        width=256,
+        height=128,
+        seed=42,
+        generations=1,
+        output_dir=tmp_path,
+        output_format=OutputFormat.png,
+        projection_mode=ProjectionMode.equirectangular,
+        scene_mode=SceneMode.normal,
+        nebula_mode=NebulaMode.galaxy_streak,
+    )
+    feat = dict(
+        look_target=LookTarget.cinematic,
+        stars=False,
+        hero_star_enabled=False,
+        nebula=True,
+        galaxy_view=True,
+        black_background=True,
+        background_gradient=False,
+    )
+    with_haze, _ = render_single(
+        finalize_render_config(
+            RenderConfig(
+                **base,
+                output_base_name="haze_on",
+                features=FeatureConfig(**feat, nebula_haze=True),
+            )
+        ),
+        0,
+    )
+    no_haze, _ = render_single(
+        finalize_render_config(
+            RenderConfig(
+                **base,
+                output_base_name="haze_off",
+                features=FeatureConfig(**feat, nebula_haze=False),
+            )
+        ),
+        0,
+    )
+    soft_on, _ = _mid_soft(with_haze["equirectangular"])
+    soft_off, std_off = _mid_soft(no_haze["equirectangular"])
+    # Continuum tube stays visible without haze; haze must still lift the floor.
+    assert soft_off < soft_on
+    assert soft_off < 0.32
+    # Structure remains (not a second flat wash at a lower level).
+    assert std_off > 0.02
+
+
+def test_feature_nebula_haze_defaults_on() -> None:
+    assert FeatureConfig().nebula_haze is True
+    assert FeatureConfig(nebula_haze=False).nebula_haze is False
+
+
+def test_no_stars_band_only_has_midplane_structure(tmp_path) -> None:
+    """--no-stars keeps the MW band pipeline with midplane luminance and no sparse star peaks."""
+    from PIL import Image
+
+    cfg = finalize_render_config(
+        RenderConfig(
+            width=256,
+            height=128,
+            seed=42,
+            generations=1,
+            output_dir=tmp_path,
+            output_base_name="band_only",
+            output_format=OutputFormat.png,
+            projection_mode=ProjectionMode.equirectangular,
+            scene_mode=SceneMode.normal,
+            nebula_mode=NebulaMode.galaxy_streak,
+            features=FeatureConfig(
+                look_target=LookTarget.cinematic,
+                stars=False,
+                hero_star_enabled=False,
+                nebula=True,
+                galaxy_view=True,
+                black_background=True,
+                background_gradient=False,
+            ),
+        )
+    )
+    assert cfg.features.stars is False
+    assert use_mw_band(cfg) is True
+    saved, _ = render_single(cfg, 0)
+    img = np.asarray(Image.open(saved["equirectangular"]), dtype=np.float64) / 255.0
+    lum = 0.2126 * img[..., 0] + 0.7152 * img[..., 1] + 0.0722 * img[..., 2]
+    h, w = lum.shape
+    mid = lum[h // 2 - 4 : h // 2 + 4]
+    poles = np.concatenate([lum[: max(2, h // 16)], lum[-max(2, h // 16) :]])
+    assert float(np.percentile(mid, 50)) > 0.02
+    # Dust lanes + emission raise midplane contrast vs a flat cream slab.
+    assert float(mid.std()) > 0.035
+    assert float(np.percentile(poles, 90)) < float(np.percentile(mid, 50)) * 0.85
+    # Dark rivers darker than bright pockets, but not binary crushed holes.
+    assert float(np.percentile(mid, 15)) < float(np.percentile(mid, 85)) * 0.78
+    assert float(np.percentile(mid, 15)) > 0.03
+    # No bright sparse star cores off-plane (unresolved grit / catalog paint).
+    # Soft continuum sheath may glow above mid-grey; star points sit much brighter.
+    off = lum[h // 5 : 2 * h // 5]
+    assert float(np.percentile(off, 99.5)) < 0.65
+
+
+def test_no_galaxy_view_skips_mw_cream_ribbon(tmp_path) -> None:
+    """--no-galaxy-view: use_mw_band false; midplane is not a MW cream ribbon."""
+    from PIL import Image
+
+    def _mid_p25(path) -> float:
+        img = np.asarray(Image.open(path), dtype=np.float64) / 255.0
+        lum = 0.2126 * img[..., 0] + 0.7152 * img[..., 1] + 0.0722 * img[..., 2]
+        h = lum.shape[0]
+        mid = lum[h // 2 - 4 : h // 2 + 4]
+        return float(np.percentile(mid, 25))
+
+    base = dict(
+        width=256,
+        height=128,
+        seed=42,
+        generations=1,
+        output_dir=tmp_path,
+        output_format=OutputFormat.png,
+        projection_mode=ProjectionMode.equirectangular,
+        scene_mode=SceneMode.normal,
+        nebula_mode=NebulaMode.galaxy_streak,
+    )
+    feat_common = dict(
+        look_target=LookTarget.cinematic,
+        stars=True,
+        hero_star_enabled=False,
+        nebula=True,
+        black_background=True,
+        background_gradient=False,
+        photoreal_stars=True,
+    )
+    off_cfg = finalize_render_config(
+        RenderConfig(
+            **base,
+            output_base_name="no_gv",
+            features=FeatureConfig(**feat_common, galaxy_view=False),
+        )
+    )
+    band_feat = {**feat_common, "galaxy_view": True, "stars": False, "hero_star_enabled": False}
+    on_cfg = finalize_render_config(
+        RenderConfig(
+            **base,
+            output_base_name="with_gv",
+            features=FeatureConfig(**band_feat),
+        )
+    )
+    assert use_mw_band(off_cfg) is False
+    assert use_mw_band(on_cfg) is True
+    off_saved, _ = render_single(off_cfg, 0)
+    on_saved, _ = render_single(on_cfg, 0)
+    soft_off = _mid_p25(off_saved["equirectangular"])
+    soft_on = _mid_p25(on_saved["equirectangular"])
+    # Stars-only midplane soft floor stays well below band-only continuum.
+    assert soft_off < soft_on * 0.45
+    assert soft_off < 0.08
+
+
+def test_no_galaxy_view_photoreal_star_cores(tmp_path) -> None:
+    """Stars without MW band still get photoreal cores (not soft grey discs)."""
+    from PIL import Image
+
+    cfg = finalize_render_config(
+        RenderConfig(
+            width=256,
+            height=128,
+            seed=42,
+            generations=1,
+            output_dir=tmp_path,
+            output_base_name="stars_solo",
+            output_format=OutputFormat.png,
+            projection_mode=ProjectionMode.equirectangular,
+            scene_mode=SceneMode.normal,
+            nebula_mode=NebulaMode.galaxy_streak,
+            features=FeatureConfig(
+                look_target=LookTarget.cinematic,
+                stars=True,
+                hero_star_enabled=False,
+                nebula=True,
+                galaxy_view=False,
+                black_background=True,
+                background_gradient=False,
+                photoreal_stars=True,
+            ),
+        )
+    )
+    assert cfg.features.background_star_density_scale >= 0.85
+    assert cfg.features.star_layer_bloom_strength >= 0.32
+    saved, _ = render_single(cfg, 0)
+    img = np.asarray(Image.open(saved["equirectangular"]), dtype=np.float64) / 255.0
+    lum = 0.2126 * img[..., 0] + 0.7152 * img[..., 1] + 0.0722 * img[..., 2]
+    # HDR display stretch + bloom (same path as nebula --no-nebula --black-background).
+    assert float(lum.max()) > 0.85
+    assert float(np.percentile(lum, 99.5)) > 0.35
+    assert float(np.percentile(lum, 99.9)) > 0.55
+
+
+def test_no_galaxy_view_stars_match_nebula_no_nebula_brightness(tmp_path) -> None:
+    """--no-galaxy-view black plate should land near nebula --no-nebula star punch."""
+    from PIL import Image
+
+    def _p995(path) -> float:
+        img = np.asarray(Image.open(path), dtype=np.float64) / 255.0
+        lum = 0.2126 * img[..., 0] + 0.7152 * img[..., 1] + 0.0722 * img[..., 2]
+        return float(np.percentile(lum, 99.5))
+
+    base = dict(
+        width=256,
+        height=128,
+        seed=42,
+        generations=1,
+        output_dir=tmp_path,
+        output_format=OutputFormat.png,
+        projection_mode=ProjectionMode.equirectangular,
+    )
+    no_gv, _ = render_single(
+        finalize_render_config(
+            RenderConfig(
+                **base,
+                output_base_name="nogv",
+                scene_mode=SceneMode.normal,
+                nebula_mode=NebulaMode.galaxy_streak,
+                features=FeatureConfig(
+                    look_target=LookTarget.cinematic,
+                    stars=True,
+                    hero_star_enabled=False,
+                    nebula=True,
+                    galaxy_view=False,
+                    black_background=True,
+                    background_gradient=False,
+                    photoreal_stars=True,
+                ),
+            )
+        ),
+        0,
+    )
+    neb, _ = render_single(
+        finalize_render_config(
+            RenderConfig(
+                **base,
+                output_base_name="neb",
+                scene_mode=SceneMode.nebula,
+                nebula_mode=NebulaMode.full,
+                features=FeatureConfig(
+                    look_target=LookTarget.cinematic,
+                    stars=True,
+                    hero_star_enabled=False,
+                    nebula=False,
+                    black_background=True,
+                    background_gradient=False,
+                    photoreal_stars=True,
+                ),
+            )
+        ),
+        0,
+    )
+    p_gv = _p995(no_gv["equirectangular"])
+    p_neb = _p995(neb["equirectangular"])
+    # Same order of magnitude — not soft pinpricks vs punched cores.
+    assert p_gv > 0.35
+    assert p_gv > p_neb * 0.35
+    assert p_gv < p_neb * 2.5
+
+
 def test_isolate_layer_heroes_smoke(tmp_path) -> None:
     cfg = RenderConfig(
         width=256,
@@ -662,3 +938,93 @@ def test_isolate_layer_heroes_smoke(tmp_path) -> None:
     saved, _stats = render_single(cfg, generation_index=0)
     assert "equirectangular" in saved
     assert saved["equirectangular"].is_file()
+
+
+def test_isolate_background_stars_and_nebula_gas_differ(tmp_path) -> None:
+    """Isolate plates are usable: stars vs gas differ; haze on/off gas plates differ."""
+    from PIL import Image
+
+    def _lu(path):
+        img = np.asarray(Image.open(path), dtype=np.float64) / 255.0
+        return 0.2126 * img[..., 0] + 0.7152 * img[..., 1] + 0.0722 * img[..., 2]
+
+    base = dict(
+        width=256,
+        height=128,
+        seed=42,
+        generations=1,
+        output_dir=tmp_path,
+        output_format=OutputFormat.png,
+        projection_mode=ProjectionMode.equirectangular,
+        scene_mode=SceneMode.normal,
+        nebula_mode=NebulaMode.galaxy_streak,
+    )
+    stars_saved, _ = render_single(
+        finalize_render_config(
+            RenderConfig(
+                **base,
+                output_base_name="iso_stars",
+                features=FeatureConfig(
+                    look_target=LookTarget.cinematic,
+                    stars=True,
+                    hero_star_enabled=False,
+                    nebula=True,
+                    galaxy_view=True,
+                    black_background=True,
+                    background_gradient=False,
+                    isolate_layer=IsolateLayer.background_stars,
+                ),
+            )
+        ),
+        0,
+    )
+    gas_on, _ = render_single(
+        finalize_render_config(
+            RenderConfig(
+                **base,
+                output_base_name="iso_gas_on",
+                features=FeatureConfig(
+                    look_target=LookTarget.cinematic,
+                    stars=False,
+                    hero_star_enabled=False,
+                    nebula=True,
+                    galaxy_view=True,
+                    nebula_haze=True,
+                    black_background=True,
+                    background_gradient=False,
+                    isolate_layer=IsolateLayer.nebula_gas,
+                ),
+            )
+        ),
+        0,
+    )
+    gas_off, _ = render_single(
+        finalize_render_config(
+            RenderConfig(
+                **base,
+                output_base_name="iso_gas_off",
+                features=FeatureConfig(
+                    look_target=LookTarget.cinematic,
+                    stars=False,
+                    hero_star_enabled=False,
+                    nebula=True,
+                    galaxy_view=True,
+                    nebula_haze=False,
+                    black_background=True,
+                    background_gradient=False,
+                    isolate_layer=IsolateLayer.nebula_gas,
+                ),
+            )
+        ),
+        0,
+    )
+    lu_s = _lu(stars_saved["equirectangular"])
+    lu_on = _lu(gas_on["equirectangular"])
+    lu_off = _lu(gas_off["equirectangular"])
+    assert float(lu_s.max()) > 0.4
+    assert float(lu_on.mean()) > 1e-4
+    assert float(lu_off.mean()) > 1e-4
+    # Haze on/off isolate plates must not be identical (structure-gate changes gas).
+    assert float(np.mean(np.abs(lu_on - lu_off))) > 0.002
+    # Star plate is not the same as gas plate.
+    assert float(np.mean(np.abs(lu_s - lu_on))) > 0.015

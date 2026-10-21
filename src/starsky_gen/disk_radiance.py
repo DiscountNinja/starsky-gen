@@ -124,7 +124,11 @@ def disk_chroma_from_star_layer(
     if not bool(np.any(gate)):
         return _DEFAULT_WARM_DISK.copy()
     lu_g = lu[gate]
-    p = float(np.percentile(lu_g[lu_g > 1e-10], np.clip(luma_percentile, 40.0, 92.0)))
+    bright = lu_g[lu_g > 1e-10]
+    # --no-stars / empty star buffers: fall back to warm disk chroma.
+    if bright.size < 8:
+        return _DEFAULT_WARM_DISK.copy()
+    p = float(np.percentile(bright, np.clip(luma_percentile, 40.0, 92.0)))
     mask = gate & (lu >= max(p * 0.55, 1e-8))
     if int(np.count_nonzero(mask)) < min_samples:
         mask = gate & (lu > 1e-10)

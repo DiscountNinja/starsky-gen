@@ -98,6 +98,7 @@ STOCK_DEFAULTS: dict[str, Any] = {
     "galaxy_view": True,
     "background_gradient": True,
     "black_background": False,
+    "nebula_haze": True,
     "jpeg_artifact_pass": False,
     "look_target": LookTarget.cinematic,
     "background_texture_strength": 1.0,
@@ -919,6 +920,8 @@ def format_guided_summary(values: dict[str, Any]) -> list[str]:
         lines.append("Background: forced black")
     elif not values.get("background_gradient", True):
         lines.append("Background: no gradient")
+    if values.get("nebula_haze") is False:
+        lines.append("Haze: off (no soft continuum wash)")
     if proj in ("cubemap", "both", "both (--cube)"):
         lines.append(f"Cubemap face: {int(values.get('cubemap_face_size', 1024))}px")
     profile = values.get("render_profile", "full")

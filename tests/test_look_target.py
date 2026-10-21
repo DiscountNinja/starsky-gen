@@ -29,7 +29,7 @@ def test_default_feature_config_is_cinematic() -> None:
     assert feat.galaxy_tone_curve == "filmic"
     assert feat.sensor_noise_stage == "off"
     assert feat.structure_inner_dust_lane_strength >= 0.82
-    assert feat.galactic_band_dust_black_strength >= 0.90
+    assert feat.galactic_band_dust_black_strength <= 0.40
     assert feat.galactic_anchor_star_count >= 30
     assert feat.m_bloom_cut >= 8.5
     assert feat.lane_star_dropout_boost >= 0.5
@@ -65,10 +65,15 @@ def test_finalize_cinematic_reinforces_mw_sandwich() -> None:
     assert out.long_exposure_look is False
     assert out.structure_architecture_strength >= 1.12
     assert out.structure_band_core_drive >= 0.68
-    assert out.structure_inner_dust_lane_strength >= 0.85
-    assert out.galactic_band_dust_black_strength >= 0.75
-    assert out.galactic_band_separation_strength >= 1.18
-    assert out.band_dark_patch_strength >= 0.55
+    # Soft cloud-volume sandwich: translucent lanes over continuum, not razor cutouts.
+    assert out.structure_inner_dust_lane_strength >= 0.72
+    assert out.galactic_band_dust_black_strength <= 0.40
+    assert out.galactic_band_separation_strength >= 0.95
+    assert out.band_dark_patch_strength <= 0.45
+    assert out.structure_vertical_extent >= 0.90
+    assert out.band_lat_sigma >= 0.15
+    assert out.morphology_void_strength <= 0.40
+    assert out.extinction_brutal_erasure_strength <= 0.45
     assert out.display_bloom_strength >= 0.09
     assert out.bloom_threshold <= 0.88
 

@@ -580,9 +580,20 @@ def sample_star_catalog(
         lat = np.where(blend < 0.38, core_lat, wing_lat)
         lat += rng.normal(0.0, 0.048, size=n_stars)
         lat = _bound_lat(np.tanh(lat * 1.22 / 1.15) * (np.pi * 0.5), pole_margin=pole_margin)
-    elif use_poisson_placement:
-        g_map = galactic_structure.stellar_density if galactic_structure is not None else None
-        if hierarchical_star_placement and layer == "background" and galactic_structure is not None:
+    elif use_poisson_placement or isotropic_field:
+        # isotropic_field must not fall through to sample_galactic_disk_lon_lat
+        # (--no-galaxy-view sets poisson off via placement kwargs).
+        g_map = (
+            None
+            if isotropic_field
+            else (galactic_structure.stellar_density if galactic_structure is not None else None)
+        )
+        if (
+            hierarchical_star_placement
+            and layer == "background"
+            and galactic_structure is not None
+            and not isotropic_field
+        ):
             from starsky_gen.galactic_structure import sample_hierarchical_from_structure
 
             lon, lat = sample_hierarchical_from_structure(

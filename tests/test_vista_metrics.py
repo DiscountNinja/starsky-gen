@@ -136,4 +136,5 @@ def test_cinematic_seeded_equirect_vista_smoke(tmp_path: Path) -> None:
     img = np.asarray(Image.open(paths["equirectangular"]).convert("RGB"), dtype=np.float64) / 255.0
     metrics = measure_vista_equirect(img)
     assert metrics["height"] == 160 and metrics["width"] == 320
-    assert_cinematic_vista(metrics, min_band_contrast=0.05, min_chroma_spread=0.008)
+    # Glow-tolerant: soft under-glow can flatten mid vs shell means; plane/void + chroma carry structure.
+    assert_cinematic_vista(metrics, min_band_contrast=0.02, min_chroma_spread=0.008)

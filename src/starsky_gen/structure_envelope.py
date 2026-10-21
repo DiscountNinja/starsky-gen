@@ -83,7 +83,8 @@ def soften_band_envelope(
     sig_cap = max(4.0, min(28.0, h * 0.22))
     soft = _blur_y_only_field(bw, float(np.clip(lat_blur_sigma, 4.0, sig_cap)))
     soft = np.clip(soft, 0.0, 1.0) ** float(np.clip(power, 0.42, 0.85))
-    return np.clip(0.14 + 0.86 * soft, 0.0, 1.0).astype(np.float64)
+    # Higher floor — razor soft_env zeros read as opaque black bites on black backgrounds.
+    return np.clip(0.28 + 0.72 * soft, 0.0, 1.0).astype(np.float64)
 
 
 def latitude_plane_gate(
@@ -191,8 +192,8 @@ def sample_band_lat_curve(
 def clamp_disk_band_thickness(
     disk_weight: np.ndarray,
     *,
-    min_half_width_frac: float = 0.050,
-    max_half_width_frac: float = 0.118,
+    min_half_width_frac: float = 0.072,
+    max_half_width_frac: float = 0.155,
     level_frac: float = 0.30,
     periodic_x: bool = True,
 ) -> np.ndarray:
@@ -364,7 +365,8 @@ def modulate_disk_weight_longitude(
     tilt = np.clip((tilt - 0.48) * 1.35, -0.35, 0.35)
     yy = np.linspace(-1.0, 1.0, h, dtype=np.float64)[:, None]
     lat_bias = 1.0 + tilt * yy * 0.22 * s
-    out = np.clip(dw * (0.58 + 0.42 * lon) * lat_bias, 0.0, 1.0)
+    # Mild lon modulation — strong 0.58+0.42*lon pinched half the band into black silhouettes.
+    out = np.clip(dw * (0.82 + 0.18 * lon) * (0.92 + 0.08 * lat_bias), 0.0, 1.0)
     mx = float(np.max(out))
     if mx > 1e-8:
         out = out / mx
@@ -405,35 +407,36 @@ def apply_variable_band_thickness(
     lon_top = _blur_x_only_field(lon_top, 4.2, periodic_x=periodic_x)
     lon_bot = _blur_x_only_field(lon_bot, 4.2, periodic_x=periodic_x)
     sig_base = float(np.clip(band_lat_sigma, 0.04, 0.22)) * 1.28
-    thick_top = 0.30 + j * (np.clip(lon_top, 0.0, 1.0) ** 1.45) * 0.85
-    thick_bot = 0.38 + j * (np.clip(lon_bot, 0.0, 1.0) ** 1.45) * 0.92
+    # Cloud volume: keep thickness mostly even — large lon/meso bites read as black cutouts.
+    thick_top = 0.78 + j * (np.clip(lon_top, 0.0, 1.0) ** 0.75) * 0.22
+    thick_bot = 0.80 + j * (np.clip(lon_bot, 0.0, 1.0) ** 0.75) * 0.22
     asym = float(np.clip(thickness_asymmetry, 0.0, 0.72))
     if asym > 1e-6:
         thin_side = 1.0 if float(rng.uniform()) < 0.5 else -1.0
-        bias = asym * float(rng.uniform(0.55, 1.0))
-        thick_top = np.clip(thick_top * (1.0 + thin_side * bias), 0.14, 1.35)
-        thick_bot = np.clip(thick_bot * (1.0 - thin_side * bias), 0.14, 1.35)
-    sig_top = np.clip(sig_base * thick_top, 0.018, 0.34)
-    sig_bot = np.clip(sig_base * thick_bot, 0.018, 0.36)
-    sig_top = np.maximum(sig_top, sig_bot * 0.50)
+        bias = asym * float(rng.uniform(0.25, 0.50))
+        thick_top = np.clip(thick_top * (1.0 + thin_side * bias), 0.55, 1.15)
+        thick_bot = np.clip(thick_bot * (1.0 - thin_side * bias), 0.55, 1.15)
+    sig_top = np.clip(sig_base * thick_top, 0.055, 0.42)
+    sig_bot = np.clip(sig_base * thick_bot, 0.055, 0.44)
+    sig_top = np.maximum(sig_top, sig_bot * 0.85)
     lon_warp = fbm2d(rng, ch, cw, base_scale=0.09, octaves=3, periodic_x=periodic_x)
     lon_warp = _resize_bilinear(lon_warp, 1, w, periodic_x=periodic_x)[0:1, :]
-    lon_warp = _blur_x_only_field(lon_warp, 3.0, periodic_x=periodic_x)
-    lon_scale = 0.82 + 0.28 * np.clip(lon_warp, 0.0, 1.0) ** 1.35
+    lon_warp = _blur_x_only_field(lon_warp, 6.5, periodic_x=periodic_x)
+    lon_scale = 0.94 + 0.10 * np.clip(lon_warp, 0.0, 1.0) ** 0.95
     sig_top = sig_top * lon_scale
     sig_bot = sig_bot * lon_scale
     sig_y = np.where(yy_eff >= 0.0, sig_top, sig_bot)
-    sig_y = np.clip(sig_y, sig_base * 0.62, sig_base * 1.22)
-    thick_mod = np.clip(1.0 + meso * 0.82, 0.48, 1.55)
+    sig_y = np.clip(sig_y, sig_base * 0.88, sig_base * 1.14)
+    thick_mod = np.clip(1.0 + meso * 0.18, 0.88, 1.14)
     sig_y = sig_y * thick_mod
-    band = np.exp(-((yy_eff / np.maximum(sig_y, 0.018)) ** 2))
+    band = np.exp(-((yy_eff / np.maximum(sig_y, 0.040)) ** 2))
     row_envelope = np.max(dw, axis=1, keepdims=True)
     row_envelope = row_envelope / (float(np.max(row_envelope)) + 1e-8)
     from starsky_gen.dust_field import _blur_y_only_field
 
     row_2d = np.broadcast_to(row_envelope, (h, w)).copy()
-    row_soft = _blur_y_only_field(row_2d, float(np.clip(h * 0.012, 2.0, 8.0)))
-    out = np.clip(band * (0.20 + 0.80 * row_soft), 0.0, 1.0)
+    row_soft = _blur_y_only_field(row_2d, float(np.clip(h * 0.018, 3.0, 12.0)))
+    out = np.clip(band * (0.35 + 0.65 * row_soft), 0.0, 1.0)
     norm = float(np.percentile(dw, 91.0)) + 1e-8
     out = np.clip(out * (0.48 + 0.52 * dw / norm), 0.0, 1.0)
     out = soften_disk_weight_band_rim(out, periodic_x=periodic_x, strength=0.40)
@@ -2246,7 +2249,8 @@ def build_fine_puff_field(
         puffs = np.clip(puffs * (0.48 + 0.52 * core**0.85) ** cb, 0.0, 1.0)
     from starsky_gen.dust_field import attenuate_row_comb
 
-    puffs = attenuate_row_comb(puffs, None, strength=0.62)
+    # Light row-comb only — heavy strength shelved clouds into horizontal ribbons.
+    puffs = attenuate_row_comb(puffs, None, strength=0.22)
     return np.clip(puffs * s, 0.0, 1.0).astype(np.float64)
 
 
@@ -2303,65 +2307,83 @@ def build_morphology_turbulent_gas_field(
     periodic_x: bool = True,
     rng: np.random.Generator | None = None,
 ) -> np.ndarray:
-    """Small-scale puffy cloud breakup along the plane (fine lanes + pockets, not a solid band)."""
-    from starsky_gen.dust_field import _blur_x_only_field, attenuate_column_comb
+    """Billowy cloud density along the plane — soft puff blobs, not hard ribbon cutouts."""
+    from starsky_gen.dust_field import band_relative_clearance
     from starsky_gen.procedural_noise import gaussian_blur_pil
 
     dust = np.clip(np.asarray(galactic.dust_absorption_morph, dtype=np.float64), 0.0, 1.0)
     turb = np.clip(np.asarray(galactic.latent_turb, dtype=np.float64), 0.0, 1.0)
-    ridge = np.clip(np.asarray(galactic.latent_ridge, dtype=np.float64), 0.0, 1.0)
     h, w = dust.shape
     scale = float(max(h, w))
-    lane_sig = float(np.clip(scale * 0.009, 1.2, 12.0))
-    med_d = gaussian_blur_pil(dust, lane_sig, periodic_x=periodic_x)
-    lanes = np.clip(dust - med_d * 0.76, 0.0, 1.0) ** 1.18
-    med_t = gaussian_blur_pil(
-        turb, float(np.clip(scale * 0.008, 1.0, 10.0)), periodic_x=periodic_x
-    )
-    turb_hi = np.clip(turb - med_t * 0.78, 0.0, 1.0) ** 1.10
-    ridge_lane = np.clip(1.0 - np.abs(ridge * 2.0 - 1.0), 0.0, 1.0) ** 1.22
     puff_rng = (
         rng
         if rng is not None
         else np.random.default_rng(int(abs(hash((h, w, float(np.mean(dust))))) % (2**31 - 1)))
     )
-    fine_puff = build_fine_puff_field(
-        puff_rng, h, w, periodic_x=periodic_x, strength=1.0, center_boost=0.85
+    # Multi-scale cotton: large billows + medium clumps + fine fluff.
+    puff_lo = build_fine_puff_field(
+        puff_rng, h, w, periodic_x=periodic_x, strength=1.0, center_boost=0.35
     )
-    dw = np.clip(np.asarray(galactic.disk_weight, dtype=np.float64), 0.0, 1.0)
-    if dw.shape != dust.shape:
-        dw = np.broadcast_to(dw, dust.shape)
-    density_gate = np.clip(dw**2.0, 0.0, 1.0)
-    field = np.clip(
-        (lanes * 0.22 + turb_hi * 0.16 + ridge_lane * 0.08 + fine_puff * 1.05)
-        * density_gate,
+    puff_lo = gaussian_blur_pil(
+        puff_lo, float(np.clip(scale * 0.022, 2.5, 18.0)), periodic_x=periodic_x
+    )
+    rng_mid = np.random.default_rng(int(puff_rng.integers(0, 2**31 - 1)) ^ 0xC10D)
+    puff_mid = build_fine_puff_field(
+        rng_mid, h, w, periodic_x=periodic_x, strength=1.0, center_boost=0.25
+    )
+    puff_mid = gaussian_blur_pil(
+        puff_mid, float(np.clip(scale * 0.010, 1.2, 10.0)), periodic_x=periodic_x
+    )
+    rng_hi = np.random.default_rng(int(puff_rng.integers(0, 2**31 - 1)) ^ 0xF155)
+    puff_hi = build_fine_puff_field(
+        rng_hi, h, w, periodic_x=periodic_x, strength=0.85, center_boost=0.15
+    )
+    # Mild dust/turb mottle only — lanes/ridges made hard shelves, not clouds.
+    med_d = gaussian_blur_pil(
+        dust, float(np.clip(scale * 0.014, 1.5, 14.0)), periodic_x=periodic_x
+    )
+    dust_mottle = np.clip(dust - med_d * 0.70, 0.0, 1.0) ** 0.85
+    med_t = gaussian_blur_pil(
+        turb, float(np.clip(scale * 0.012, 1.2, 12.0)), periodic_x=periodic_x
+    )
+    turb_mottle = np.clip(turb - med_t * 0.72, 0.0, 1.0) ** 0.88
+    clouds = np.clip(
+        puff_lo * 0.42 + puff_mid * 0.34 + puff_hi * 0.18 + dust_mottle * 0.04 + turb_mottle * 0.02,
         0.0,
         1.0,
     )
-    field = _blur_x_only_field(field, 0.65, periodic_x=periodic_x)
-    field = attenuate_column_comb(
-        field, galactic.disk_weight, strength=0.44, periodic_x=periodic_x
+    # Emphasize clump peaks so midtones aren't a flat wash (still soft, not binary).
+    clouds = np.clip(clouds ** 0.78, 0.0, 1.0)
+    soft_env = soften_band_envelope(
+        galactic.disk_weight, (h, w), periodic_x=periodic_x, lat_blur_sigma=18.0, power=0.45
     )
-    from starsky_gen.dust_field import attenuate_row_comb
-
-    field = attenuate_row_comb(field, galactic.disk_weight, strength=0.58)
-    from starsky_gen.dust_field import band_relative_clearance
-
     clear = band_relative_clearance(
-        ext_paint, galactic.disk_weight, min_clear=0.18, power=0.82
+        ext_paint, galactic.disk_weight, min_clear=0.10, power=0.62
     )
-    dust_open = np.clip(1.0 - dust * 0.78, 0.0, 1.0) ** 0.98
-    out = np.clip(field * clear * dust_open * density_gate, 0.0, 1.0)
-    soft_env = soften_band_envelope(galactic.disk_weight, (h, w), periodic_x=periodic_x)
-    from starsky_gen.dust_field import _band_host_gate
-
-    core = _band_host_gate(galactic.disk_weight, (h, w)) > 0.42
-    rim = (~core) & (soft_env < 0.90)
-    if bool(np.any(rim)):
-        out = out.copy()
-        rim_w = np.clip(soft_env[rim] / 0.90, 0.0, 1.0) ** 1.05
-        out[rim] = np.clip(out[rim] * rim_w, 0.05, 1.0)
-    return out.astype(np.float64)
+    dust_open = np.clip(1.0 - dust * 0.42, 0.0, 1.0) ** 0.80
+    # Density modulates clouds; never punches to empty silhouette.
+    out = np.clip(
+        clouds * (0.62 + 0.38 * clear) * (0.65 + 0.35 * dust_open),
+        0.0,
+        1.0,
+    )
+    # Soft stretch in-band for readable clump contrast without flat tops.
+    host = soft_env
+    on = host > 0.22
+    if bool(np.any(on)):
+        lo = float(np.percentile(out[on], 12.0))
+        hi = float(np.percentile(out[on], 90.0)) + 1e-8
+        stretched = np.clip((out - lo) / max(hi - lo, 1e-6), 0.0, 1.0) ** 0.82
+        out = np.clip(out * (1.0 - 0.62 * host) + stretched * (0.62 * host), 0.0, 1.0)
+    # Luminous floor + soft envelope — keep wisps outside the hard disk core.
+    body = np.clip(0.18 + 0.82 * out, 0.0, 1.0)
+    wisp_env = np.clip(soft_env ** 0.72, 0.0, 1.0)
+    out = body * (0.38 + 0.62 * wisp_env)
+    # Light feather only — heavy blur erased billowy clump read.
+    out = gaussian_blur_pil(
+        out, float(np.clip(scale * 0.0035, 0.6, 4.0)), periodic_x=periodic_x
+    )
+    return np.clip(out, 0.0, 1.0).astype(np.float64)
 
 
 def diffuse_scale_hierarchy(

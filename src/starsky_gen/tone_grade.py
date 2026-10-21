@@ -197,8 +197,9 @@ def apply_galaxy_scene_tone(
         rein_k = 0.44
     canvas = reinhard_luma_preserving(canvas, k=rein_k)
     lu = rec709_luma(canvas)
-    hi = np.clip((lu - 0.40) / 0.38, 0.0, 1.0) ** 1.15
-    comp = np.maximum(canvas, 0.0) ** 1.22
+    # Compress only hero highlights — mid continuum keeps relative structure.
+    hi = np.clip((lu - 0.48) / 0.38, 0.0, 1.0) ** 1.15
+    comp = np.maximum(canvas, 0.0) ** 1.10
     m = (dw * hi)[..., np.newaxis]
     canvas = np.maximum(canvas * (1.0 - m) + comp * m, 0.0)
     return canvas

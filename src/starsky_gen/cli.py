@@ -41,6 +41,7 @@ from starsky_gen.cli_options import (
     MorphologyScarStrengthOpt,
     MorphologyVoidStrengthOpt,
     NebulaDebugPassOpt,
+    NebulaHazeOpt,
     NebulaHeroColorOpt,
     NebulaInteractDensityOpt,
     NebulaInteractStrengthOpt,
@@ -125,6 +126,7 @@ def _feature_config_from_cli(
     galaxy_view: bool,
     background_gradient: bool,
     black_background: bool,
+    nebula_haze: bool,
     jpeg_artifact_pass: bool,
     look_target: LookTarget,
     long_exposure_look: bool,
@@ -158,6 +160,7 @@ def _feature_config_from_cli(
         look_target=look_target,
         background_gradient=background_gradient,
         black_background=black_background,
+        nebula_haze=nebula_haze,
         jpeg_artifact_pass=jpeg_artifact_pass,
         long_exposure_look=long_exposure_look,
         background_texture_strength=background_texture_strength,
@@ -194,6 +197,7 @@ def _default_to_generate(
     galaxy_view: GalaxyViewOpt = True,
     background_gradient: BackgroundGradientOpt = True,
     black_background: BlackBackgroundOpt = False,
+    nebula_haze: NebulaHazeOpt = True,
     jpeg_artifact_pass: JpegArtifactPassOpt = False,
     look_target: LookTargetOpt = LookTarget.cinematic,
     long_exposure_look: LongExposureLookOpt = False,
@@ -241,6 +245,7 @@ def _default_to_generate(
             galaxy_view=galaxy_view,
             background_gradient=background_gradient,
             black_background=black_background,
+            nebula_haze=nebula_haze,
             jpeg_artifact_pass=jpeg_artifact_pass,
             look_target=look_target,
             long_exposure_look=long_exposure_look,
@@ -333,6 +338,7 @@ def generate(
     galaxy_view: GalaxyViewOpt = True,
     background_gradient: BackgroundGradientOpt = True,
     black_background: BlackBackgroundOpt = False,
+    nebula_haze: NebulaHazeOpt = True,
     jpeg_artifact_pass: JpegArtifactPassOpt = False,
     look_target: LookTargetOpt = LookTarget.cinematic,
     long_exposure_look: LongExposureLookOpt = False,
@@ -379,6 +385,7 @@ def generate(
         galaxy_view=galaxy_view,
         background_gradient=background_gradient,
         black_background=black_background,
+        nebula_haze=nebula_haze,
         jpeg_artifact_pass=jpeg_artifact_pass,
         look_target=look_target,
         long_exposure_look=long_exposure_look,
@@ -427,6 +434,7 @@ def _run_generate(
     galaxy_view: bool,
     background_gradient: bool,
     black_background: bool,
+    nebula_haze: bool,
     jpeg_artifact_pass: bool,
     look_target: LookTarget,
     long_exposure_look: bool,
@@ -475,6 +483,7 @@ def _run_generate(
         "galaxy_view": galaxy_view,
         "background_gradient": background_gradient,
         "black_background": black_background,
+        "nebula_haze": nebula_haze,
         "jpeg_artifact_pass": jpeg_artifact_pass,
         "look_target": look_target,
         "long_exposure_look": long_exposure_look,
@@ -544,6 +553,7 @@ def _run_generate(
         galaxy_view = kwargs["galaxy_view"]
         background_gradient = kwargs["background_gradient"]
         black_background = kwargs["black_background"]
+        nebula_haze = kwargs["nebula_haze"]
         jpeg_artifact_pass = kwargs["jpeg_artifact_pass"]
         look_target = kwargs["look_target"]
         long_exposure_look = kwargs["long_exposure_look"]
@@ -588,6 +598,7 @@ def _run_generate(
             "galaxy_view": galaxy_view,
             "background_gradient": background_gradient,
             "black_background": black_background,
+            "nebula_haze": nebula_haze,
             "jpeg_artifact_pass": jpeg_artifact_pass,
             "look_target": look_target,
             "background_texture_strength": background_texture_strength,
@@ -635,6 +646,7 @@ def _run_generate(
         galaxy_view = bool(chosen["galaxy_view"])
         background_gradient = bool(chosen["background_gradient"])
         black_background = bool(chosen["black_background"])
+        nebula_haze = bool(chosen.get("nebula_haze", nebula_haze))
         jpeg_artifact_pass = bool(chosen["jpeg_artifact_pass"])
         look_target = chosen["look_target"]
         if not isinstance(look_target, LookTarget):
@@ -706,6 +718,7 @@ def _run_generate(
             galaxy_view=galaxy_view,
             background_gradient=background_gradient,
             black_background=black_background,
+            nebula_haze=nebula_haze,
             jpeg_artifact_pass=jpeg_artifact_pass,
             look_target=look_target,
             long_exposure_look=long_exposure_look,
@@ -746,6 +759,7 @@ def _run_generate(
                 "galaxy_view": cfg.features.galaxy_view,
                 "background_gradient": cfg.features.background_gradient,
                 "black_background": cfg.features.black_background,
+                "nebula_haze": cfg.features.nebula_haze,
                 "look_target": cfg.features.look_target,
                 "background_texture_strength": cfg.features.background_texture_strength,
                 "nebula_style": cfg.nebula_tuning.style,

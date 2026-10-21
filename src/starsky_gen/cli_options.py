@@ -97,6 +97,16 @@ BlackBackgroundOpt = Annotated[
     bool,
     typer.Option(help="Force black background (overrides gradient/noise background)."),
 ]
+NebulaHazeOpt = Annotated[
+    bool,
+    typer.Option(
+        "--haze/--no-haze",
+        help=(
+            "Soft ISM/gas continuum wash (morph body, haze/cloud/glow, band lift, grade floor). "
+            "Off keeps dust/emission structure; use --no-nebula for no gas at all."
+        ),
+    ),
+]
 JpegArtifactPassOpt = Annotated[bool, typer.Option(help="Apply JPEG artifact emulation pass.")]
 LookTargetOpt = Annotated[
     LookTarget,

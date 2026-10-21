@@ -491,7 +491,7 @@ def band_transmission_from_morph_absorption(
         hi_a = lo_a + 0.15
     morph_o = compress_absorption_opacity(morph, gamma=opacity_gamma)
     norm = np.clip((morph_o - lo_a) / (hi_a - lo_a), 0.0, 1.0)
-    target = vf + (1.0 - norm**2.55) * (t_clear - vf)
+    target = vf + (1.0 - norm**1.55) * (t_clear - vf)
     sig = float(np.clip(max(h, w) * 0.014, 1.8, 16.0))
     med_m = gaussian_blur_pil(morph, sig, periodic_x=periodic_x)
     hp_m = np.clip(morph - med_m * 0.74, -0.45, 0.45)
@@ -499,7 +499,9 @@ def band_transmission_from_morph_absorption(
     hp_f = np.clip(fil - med_f * 0.76, -0.35, 0.35)
     fd = float(np.clip(filament_detail, 0.0, 0.45))
     punch = np.clip(pm, 0.0, 1.0) if pm is not None else np.zeros((h, w), dtype=np.float64)
-    morph_dark = target - hp_m * (0.86 + 0.48 * punch)
+    if float(np.max(punch)) > 1e-6:
+        punch = gaussian_blur_pil(punch, max(sig * 0.45, 0.8), periodic_x=periodic_x)
+    morph_dark = target - hp_m * (0.92 + 0.18 * punch)
     # Morphology coupling only in the disk — off-band keeps filament transmission (clear sky).
     if band_weight is not None:
         bw = np.clip(np.asarray(band_weight, dtype=np.float64), 0.0, 1.0)

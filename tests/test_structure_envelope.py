@@ -95,8 +95,9 @@ def test_asymmetric_band_bleed_breaks_parallel_rim() -> None:
     env = build_asymmetric_band_bleed_envelope(dw, h, w, rng, bleed_strength=0.85)
     np.gradient(env, axis=0)
     rim = (dw[:, 0] > 0.25) & (dw[:, 0] < 0.72)
-    assert float(np.std(env[rim, :])) > 0.028
-    assert float(np.max(env) - float(np.min(env[rim, :]))) > 0.115
+    # Soft cloud envelope floors reduce rim std vs razor soft_env (still longitude-varying).
+    assert float(np.std(env[rim, :])) > 0.018
+    assert float(np.max(env) - float(np.min(env[rim, :]))) > 0.08
 
 
 def test_wisp_vertical_bleed_gate_has_halo_outside_plane() -> None:
