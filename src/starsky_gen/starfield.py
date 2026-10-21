@@ -1068,11 +1068,25 @@ def _paint_thin_diffraction_spikes(
     if radius >= 5:
         if not force and rng.random() >= 0.52:
             return
-        L = int(rng.integers(16 if force else 14, 32 if force else 26))
+        # force + display-referred (no flux_scale): longer/brighter arms so spokes
+        # survive on graded MW plates (HDR-scale amps wash out post-tonemap).
+        _disp_force = bool(force and fs is None)
+        L = int(
+            rng.integers(
+                36 if _disp_force else (16 if force else 14),
+                64 if _disp_force else (32 if force else 26),
+            )
+        )
         if fs is not None:
             amp0 = fs * float(rng.uniform(0.006 if force else 0.0025, 0.014 if force else 0.006))
         else:
-            amp0 = peak * float(rng.uniform(0.055 if force else 0.022, 0.12 if force else 0.058))
+            # Display-referred force path needs bright additive arms — warm MW
+            # continuum swallows HDR-scale or max-blend spokes.
+            amp0 = peak * float(
+                rng.uniform(1.6 if _disp_force else 0.022, 2.4 if _disp_force else 0.058)
+            )
+        _fall_pow = 0.62 if _disp_force else 1.05
+        _fall_base = 0.22 if _disp_force else 0.45
     elif radius >= 4:
         if not force and rng.random() >= 0.14:
             return
@@ -1081,6 +1095,8 @@ def _paint_thin_diffraction_spikes(
             amp0 = fs * float(rng.uniform(0.004 if force else 0.0018, 0.010 if force else 0.0045))
         else:
             amp0 = peak * float(rng.uniform(0.035 if force else 0.012, 0.08 if force else 0.038))
+        _fall_pow = 1.05
+        _fall_base = 0.45
     else:
         if not force and (peak < 0.38 or rng.random() >= 0.065):
             return
@@ -1089,6 +1105,8 @@ def _paint_thin_diffraction_spikes(
             amp0 = fs * float(rng.uniform(0.002, 0.006))
         else:
             amp0 = peak * float(rng.uniform(0.018 if force else 0.007, 0.045 if force else 0.022))
+        _fall_pow = 1.05
+        _fall_base = 0.45
 
     # Unit spectral tint for chroma; energy lives in amp0.
     tint = color_rgb.astype(np.float64)
@@ -1101,7 +1119,11 @@ def _paint_thin_diffraction_spikes(
     L = int(min(L, max(2, edge_room)))
     if L < 2:
         return
-    ang = float(rng.uniform(0.0, 0.5 * np.pi))
+    # Prefer near-axis crosses (classic spider); small jitter only when forced.
+    if force and fs is None:
+        ang = float(rng.uniform(-0.12, 0.12))
+    else:
+        ang = float(rng.uniform(0.0, 0.5 * np.pi))
     for k in range(4):
         th = ang + k * (0.5 * np.pi)
         cth, sth = float(np.cos(th)), float(np.sin(th))
@@ -1111,10 +1133,16 @@ def _paint_thin_diffraction_spikes(
             py, px = y + oy, (x + ox) % w
             if py < edge_pad or py >= h - edge_pad:
                 continue
-            fall = 1.0 / ((0.45 + float(t)) ** 1.05)
+            fall = 1.0 / ((_fall_base + float(t)) ** _fall_pow)
             tip = float(t) / float(max(L, 1))
             chrom = np.array([0.96 - 0.05 * tip, 0.98 - 0.02 * tip, 1.0 + 0.10 * tip], dtype=np.float64)
-            img[py, px] += tint * (amp0 * fall) * chrom
+            add = tint * (amp0 * fall) * chrom
+            # Additive + 1px neighbor — must exceed continuum to read on MW plates.
+            for npy, npx in ((py, px), (py, (px + 1) % w), (min(h - 1, py + 1), px)):
+                if npy < edge_pad or npy >= h - edge_pad:
+                    continue
+                scale = 1.0 if (npy == py and npx == px) else 0.55
+                img[npy, npx] = np.clip(img[npy, npx] + add * scale, 0.0, None)
 
 
 def paint_star(
